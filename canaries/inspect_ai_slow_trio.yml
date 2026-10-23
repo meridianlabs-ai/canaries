@@ -6,7 +6,7 @@ repo: UKGovernmentBEIS/inspect_ai
 ref: main
 cadence: 2h
 python: "3.11"
-timeout-minutes: 180
+timeout-minutes: 60
 install: |
   uv venv
   uv pip install --exclude-newer false -e ".[dev]" pytest-timeout
