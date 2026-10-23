@@ -442,6 +442,15 @@ def main():
         print(f"Posted a test message {'with a thread reply' if ts else 'through the webhook'}.")
         return
 
+    # A manual re-post of an earlier run's red canaries, e.g. one that alerted
+    # before the threaded details existed. No state comparison.
+    repost = env.get("REPOST_RUN", "").strip()
+    if repost and not repost.isdigit():
+        print(f"::error::repost_run must be a run ID, not {repost!r}")
+        return 1
+    if repost:
+        run_id = repost
+
     github = GitHub(env["GITHUB_API_URL"], repo, env["GH_TOKEN"])
     run = github.get(f"actions/runs/{run_id}")
     jobs = github.jobs(run_id)
@@ -454,8 +463,10 @@ def main():
     current = [j for j in jobs if j["name"] not in NOT_CANARIES and state(j["conclusion"])]
 
     for job in current:
-        previous = previous_job(job["name"], github.history(run))
-        if not changed(job, previous):
+        if repost:
+            if state(job["conclusion"]) != "red":
+                continue
+        elif not changed(job, previous_job(job["name"], github.history(run))):
             print(f"{job['name']}: still {state(job['conclusion'])}")
             continue
         red = state(job["conclusion"]) == "red"

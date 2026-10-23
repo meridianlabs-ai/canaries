@@ -13,6 +13,9 @@ on:
         description: Only send a test message to the alert channel
         type: boolean
         default: false
+      repost_run:
+        description: Only re-post the alerts (with details) for the red canaries of this earlier run ID
+        required: false
   pull_request:
     paths:
       - canaries/**
@@ -28,7 +31,7 @@ concurrency:
 
 jobs:
   plan:
-    if: ${{ !inputs.test_slack }}
+    if: ${{ !inputs.test_slack && !inputs.repost_run }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -105,7 +108,7 @@ jobs:
   # code blocks under a label. Alerts only when a canary changes state.
   notify:
     needs: [plan, canary]
-    if: ${{ always() && (inputs.test_slack || github.event_name == 'schedule') }}
+    if: ${{ always() && (inputs.test_slack || inputs.repost_run || github.event_name == 'schedule') }}
     runs-on: ubuntu-latest
     environment: slack
     permissions:
@@ -122,5 +125,6 @@ jobs:
           SLACK_CHANNEL_ID: ${{ vars.CANARY_SLACK_CHANNEL_ID }}
           SLACK_WEBHOOK_URL: ${{ secrets.CANARY_SLACK_WEBHOOK_URL }}
           TEST_SLACK: ${{ inputs.test_slack }}
+          REPOST_RUN: ${{ inputs.repost_run }}
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/notify.py
