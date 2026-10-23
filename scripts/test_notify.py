@@ -529,3 +529,31 @@ class Main(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SlackFallback(unittest.TestCase):
+    def test_a_failing_bot_post_falls_back_to_the_webhook(self):
+        calls = []
+
+        def fake_request(url, data=None, headers=None):
+            calls.append(url)
+            if "chat.postMessage" in url:
+                return json.dumps({"ok": False, "error": "missing_scope"}).encode()
+            return b"ok"
+
+        slack = notify.Slack("xoxb-test", "C123", "https://hooks.example/abc")
+        with mock.patch.object(notify, "request", fake_request), mock.patch.object(notify.time, "sleep"):
+            # No ts comes back, so main() posts no thread reply under it.
+            self.assertIsNone(slack.post("alert"))
+            self.assertIsNone(slack.post("next alert"))
+        self.assertEqual(
+            calls,
+            ["https://slack.com/api/chat.postMessage", "https://hooks.example/abc", "https://hooks.example/abc"],
+        )
+
+    def test_a_failing_bot_post_without_a_webhook_raises(self):
+        slack = notify.Slack("xoxb-test", "C123", None)
+        fake = lambda *a, **k: json.dumps({"ok": False, "error": "missing_scope"}).encode()
+        with mock.patch.object(notify, "request", fake):
+            with self.assertRaises(RuntimeError):
+                slack.post("alert")

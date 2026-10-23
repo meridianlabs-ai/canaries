@@ -408,7 +408,14 @@ class Slack:
             )
         )
         if not response.get("ok"):
-            raise RuntimeError(f"chat.postMessage failed: {response.get('error')}")
+            error = f"chat.postMessage failed: {response.get('error')}"
+            if not self.webhook:
+                raise RuntimeError(error)
+            # Still get the alert out: webhook from here on, without threads.
+            print(f"::warning::{error}; falling back to the webhook without thread replies.")
+            self.bot_token = None
+            request(self.webhook, json.dumps({k: body[k] for k in ("text", "unfurl_links", "unfurl_media")}).encode(), {"Content-Type": "application/json"})
+            return None
         return response["ts"]
 
 
