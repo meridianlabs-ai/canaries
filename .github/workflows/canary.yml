@@ -49,7 +49,7 @@ jobs:
   canary:
     needs: plan
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runs-on || 'ubuntu-latest' }}
     timeout-minutes: ${{ matrix.timeout-minutes }}
     strategy:
       fail-fast: false
@@ -72,6 +72,12 @@ jobs:
           version: 0.13.5
           python-version: ${{ matrix.python }}
           enable-cache: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ matrix.node }}
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
 
       - name: Record what we tested
         run: git rev-parse HEAD

@@ -43,4 +43,6 @@ test: |
   uv run --no-sync pytest -ra -n logical
 ```
 
+Optional fields: `runs-on` (a runner label; default `ubuntu-latest`) and `node` (a Node.js version to set up before installing). Set environment variables inside `install` or `test` with `export`.
+
 A pull request that changes `canaries/` runs the canaries, so the new entry shows its first result on the PR. To run one entry by hand: **Actions → canary → Run workflow**, with `only` set to its name.
