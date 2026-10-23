@@ -225,9 +225,9 @@ def failing_step(job):
 def alert_text(name, red, job_url, commit):
     """The channel message: canary, what it tested, and the run."""
     if red:
-        head = f":red_circle: Canary {plain(name)} is failing on the newest releases."
+        head = f":rotating_light: Canary {plain(name)} is failing on the newest releases."
     else:
-        head = f":large_green_circle: Canary {plain(name)} recovered."
+        head = f":white_check_mark: Canary {plain(name)} recovered."
     if commit:
         repo, sha = commit
         head += f" Tested <https://github.com/{repo}/commit/{sha}|{repo}@{sha[:10]}>."
