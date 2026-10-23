@@ -1,0 +1,20 @@
+# inspect_scout's tests and mypy against inspect_ai main and the newest
+# releases of everything else (the Python jobs of inspect_scout's nightly).
+name: inspect_scout-py311
+repo: meridianlabs-ai/inspect_scout
+ref: main
+cadence: nightly
+python: "3.11"
+timeout-minutes: 30
+install: |
+  # scout's Python jobs check out without the ts-mono submodule; with it, mypy
+  # would also check ts-mono's Python fixtures.
+  git submodule deinit --all --force
+  uv venv
+  uv pip install --exclude-newer false git+https://github.com/UKGovernmentBEIS/inspect_ai.git
+  uv pip install --exclude-newer false ".[dev]"
+test: |
+  status=0
+  uv run --no-sync pytest -ra || status=1
+  uv run --no-sync mypy src examples tests || status=1
+  exit $status
