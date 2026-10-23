@@ -1,11 +1,12 @@
 # inspect_sentinel against inspect_ai and inspect_scout main and the newest
-# releases of everything else: tests, pyright, and the LiteLLM guardrail at
-# each LiteLLM version sentinel's CI supports plus the newest LiteLLM release.
-name: inspect_sentinel-py311
+# releases of everything else, on the newest Python in its CI, as one canary so
+# a break alerts once: tests, pyright, and the LiteLLM guardrail at each LiteLLM
+# version sentinel's CI supports plus the newest LiteLLM release.
+name: inspect_sentinel
 repo: meridianlabs-ai/inspect_sentinel
 ref: main
 cadence: nightly
-python: "3.11"
+python: "3.14"
 timeout-minutes: 60
 install: |
   uv venv
@@ -15,9 +16,10 @@ install: |
     git+https://github.com/meridianlabs-ai/inspect_scout.git
   uv pip install --exclude-newer false -e ".[dev]"
 test: |
+  # Every check runs; the step fails if any did.
   status=0
-  uv run --no-sync pytest || status=1
-  uv run --no-sync pyright || status=1
+  echo "::group::pytest"; uv run --no-sync pytest || status=1; echo "::endgroup::"
+  echo "::group::pyright"; uv run --no-sync pyright || status=1; echo "::endgroup::"
   # The guardrail runs in LiteLLM's process, so it's tested in an environment of
   # its own per LiteLLM version: the ones in sentinel's build.yaml, plus the newest.
   supported=$(yq '.jobs["litellm-guardrail"].strategy.matrix["litellm-version"][]' .github/workflows/build.yaml)
