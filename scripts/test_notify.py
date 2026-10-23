@@ -444,6 +444,27 @@ class Main(unittest.TestCase):
         self.assertIn("Canary `a` recovered", body["text"])
         self.assertNotIn("channel", body)
 
+    def test_repost_alerts_an_earlier_runs_red_canaries_without_comparing(self):
+        failing_steps = CANARY_STEPS + [step("Test", "failure", "00:09", "06:31", 5)]
+        runs = {
+            100: [job("notify", None, id=9, run_id=100)],
+            99: [job("plan", "success", id=5, run_id=99), job("inspect_ai", "failure", id=6, run_id=99, steps=failing_steps), job("b", "success", id=7, run_id=99)],
+            98: [job("inspect_ai", "failure", id=3, run_id=98), job("b", "success", id=4, run_id=98)],
+            97: [job("inspect_ai", "success", id=1, run_id=97, steps=CANARY_STEPS)],
+        }
+        logs = {6: canary_log(test_output=["FAILED tests/t.py::test_x - boom"]), 1: canary_log(sha=OLD_SHA, versions=(("anyio", "4.10.0"),))}
+        posts = self.run_main(runs, {"SLACK_BOT_TOKEN": "xoxb", "SLACK_CHANNEL_ID": "C1", "REPOST_RUN": "99"}, logs)
+        # Still red since run 98, but a re-post alerts anyway; green canaries are skipped.
+        self.assertEqual(len(posts), 2)
+        (_, alert), (_, reply) = posts
+        self.assertIn("Canary `inspect_ai` is failing", alert["text"])
+        self.assertIn("actions/runs/99/job/6", alert["text"])
+        self.assertIn("tests/t.py::test_x", reply["text"])
+
+    def test_repost_rejects_anything_but_a_run_id(self):
+        posts = self.run_main({100: []}, {"SLACK_WEBHOOK_URL": "https://hooks.example/x", "REPOST_RUN": "99; rm -rf /"})
+        self.assertEqual(posts, [])
+
     def test_planning_failure_posts_one_plain_message(self):
         runs = {
             100: [job("plan", "failure", id=1, run_id=100), job("matrix.name", "skipped", id=2, run_id=100)],
@@ -529,3 +550,31 @@ class Main(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SlackFallback(unittest.TestCase):
+    def test_a_failing_bot_post_falls_back_to_the_webhook(self):
+        calls = []
+
+        def fake_request(url, data=None, headers=None):
+            calls.append(url)
+            if "chat.postMessage" in url:
+                return json.dumps({"ok": False, "error": "missing_scope"}).encode()
+            return b"ok"
+
+        slack = notify.Slack("xoxb-test", "C123", "https://hooks.example/abc")
+        with mock.patch.object(notify, "request", fake_request), mock.patch.object(notify.time, "sleep"):
+            # No ts comes back, so main() posts no thread reply under it.
+            self.assertIsNone(slack.post("alert"))
+            self.assertIsNone(slack.post("next alert"))
+        self.assertEqual(
+            calls,
+            ["https://slack.com/api/chat.postMessage", "https://hooks.example/abc", "https://hooks.example/abc"],
+        )
+
+    def test_a_failing_bot_post_without_a_webhook_raises(self):
+        slack = notify.Slack("xoxb-test", "C123", None)
+        fake = lambda *a, **k: json.dumps({"ok": False, "error": "missing_scope"}).encode()
+        with mock.patch.object(notify, "request", fake):
+            with self.assertRaises(RuntimeError):
+                slack.post("alert")
