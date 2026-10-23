@@ -17,33 +17,51 @@ import sys
 CADENCE_BY_CRON = {"0 */2 * * *": {"2h"}, "30 5 * * *": {"2h", "nightly"}}
 
 entries = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
-names = [e["name"] for e in entries]
-if len(names) != len(set(names)):
-    sys.exit("duplicate canary names in canaries/")
-if {"plan", "notify"} & set(names):
-    sys.exit("plan and notify are the workflow's own job names; a canary can't use them")
 
-# Names and labels can't hold spaces or parentheses, so a job name maps back to
-# exactly one canary.
+# Names and labels must be YAML strings (so `1` and `"1"` can't both become
+# `a (1)`) without spaces or parentheses, so each job name maps back to
+# exactly one canary; scripts/notify.py parses job names with the same pattern.
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 VARIANT_FIELDS = {"label", "python", "install", "test", "runs-on", "node", "timeout-minutes"}
+RULE = "a string of letters, digits, '.', '_' or '-' (quote it if YAML would read a number or boolean)"
+
+
+def valid(value):
+    return isinstance(value, str) and NAME.fullmatch(value)
+
+
+def jobs(canary):
+    """One matrix entry per variant (or one for the canary), with its job name."""
+    base = {k: v for k, v in canary.items() if k != "variants"} | {"canary": canary["name"]}
+    if "variants" not in canary:
+        return [base]
+    return [base | v | {"name": f"{canary['name']} ({v['label']})"} for v in canary["variants"]]
+
+
 for e in entries:
-    if not NAME.fullmatch(str(e["name"])):
-        sys.exit(f"canary name {e['name']!r} must be letters, digits, '.', '_' or '-'")
+    if not valid(e.get("name")):
+        sys.exit(f"canary name {e.get('name')!r} must be {RULE}")
+    if e["name"] in {"plan", "notify"}:
+        sys.exit("plan and notify are the workflow's own job names; a canary can't use them")
     variants = e.get("variants")
     if variants is None:
         continue
     if not isinstance(variants, list) or not variants:
         sys.exit(f"{e['name']}: variants must be a non-empty list")
-    labels = []
     for v in variants:
-        if not isinstance(v, dict) or not NAME.fullmatch(str(v.get("label", ""))):
-            sys.exit(f"{e['name']}: each variant needs a label of letters, digits, '.', '_' or '-'")
+        if not isinstance(v, dict) or not valid(v.get("label")):
+            label = v.get("label") if isinstance(v, dict) else v
+            sys.exit(f"{e['name']}: variant label {label!r} must be {RULE}")
         if v.keys() - VARIANT_FIELDS:
             sys.exit(f"{e['name']} ({v['label']}): a variant can only set {', '.join(sorted(VARIANT_FIELDS))}")
-        labels.append(v["label"])
-    if len(labels) != len(set(labels)):
-        sys.exit(f"{e['name']}: duplicate variant labels")
+
+names = [e["name"] for e in entries]
+if len(names) != len(set(names)):
+    sys.exit("duplicate canary names in canaries/")
+job_names = [job["name"] for e in entries for job in jobs(e)]
+duplicates = sorted({n for n in job_names if job_names.count(n) > 1})
+if duplicates:
+    sys.exit(f"duplicate job names {', '.join(duplicates)}: variant labels must be unique within a canary")
 
 # Check each repository out under its own name, as its own CI does: some test
 # suites expect the checkout directory to be named after the project.
@@ -69,15 +87,6 @@ elif changed is not None:
     due = entries if paths & EVERY_CANARY else [e for e in entries if f"canaries/{e['name']}.yml" in paths]
 else:
     due = entries
-
-
-def jobs(canary):
-    """One matrix entry per variant (or one for the canary), with its job name."""
-    base = {k: v for k, v in canary.items() if k != "variants"} | {"canary": canary["name"]}
-    if "variants" not in canary:
-        return [base]
-    return [base | v | {"name": f"{canary['name']} ({v['label']})"} for v in canary["variants"]]
-
 
 include = [job for canary in due for job in jobs(canary)]
 print(json.dumps({"include": include}))

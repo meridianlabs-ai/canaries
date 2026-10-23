@@ -106,6 +106,16 @@ class Grouping(unittest.TestCase):
         self.assertEqual(notify.canary_and_part("inspect_ai"), ("inspect_ai", None))
         self.assertEqual(notify.canary_and_part("inspect_vscode-proxy-routes"), ("inspect_vscode-proxy-routes", None))
 
+    def test_only_names_the_planner_generates_parse(self):
+        """The review's Q1: the parser is as strict as the planner."""
+        for name in ("x ()", "a (b) (c)", "a (b (c))", "a (x)\n", "a\n", "a  (x)", "a(x)", "a (x y)", "a (x", " a", "plan", "notify", "plan (fake)", "notify (x)", "", "${{ matrix.name }}"):
+            self.assertIsNone(notify.canary_and_part(name), name)
+
+    def test_names_that_dont_parse_are_ignored(self):
+        jobs = [job("victim (safe)", "success"), job("victim (b) (c)", "failure"), job("victim ()", "failure"), job("plan (fake)", "failure")]
+        self.assertEqual(list(notify.by_canary(jobs)), ["victim"])
+        self.assertEqual(notify.canary_state(notify.by_canary(jobs)["victim"]), "green")
+
     def test_jobs_group_by_canary_in_order(self):
         jobs = [job("plan", "success"), job("a (x)", "success"), job("b", "failure"), job("a (y)", "failure"), job("notify", None)]
         groups = notify.by_canary(jobs)
@@ -215,6 +225,45 @@ class Parts(unittest.TestCase):
             self.assertIn(f"*Part* `part{i}` (<https://x/job/{i}|Run log>)", text)
         self.assertEqual(text.count("*Failed tests* (100+)"), 4)
         self.assertEqual(text.count("*Versions changed since"), 4)
+
+    def test_many_long_labelled_parts_stay_within_one_reply(self):
+        """The review's R1: 128 failing parts with long labels and escaped log text."""
+        noisy = [f"FAILED tests/t.py::test_{i} - <&>" + "&<>" * 90 for i in range(120)] + ["<!channel> & " * 25] * 60
+        failing = []
+        for i in range(128):
+            j = job(f"a (part{i:03}-{'a' * 60})", "failure", id=i, run_id=7, steps=CANARY_STEPS + [step("Test", "failure", "00:09", "06:31", 5)])
+            failing.append((j, f"https://github.com/o/r/actions/runs/7/job/{i}", canary_log(test_output=noisy), None, "", ""))
+        text = notify.details_text(failing, ran=130, run_url="https://github.com/o/r/actions/runs/7")
+        self.assertLessEqual(len(text), notify.REPLY_CHARS)
+        self.assertIn("*Failing parts* (128 of 130): ", text)
+        self.assertIn("and 122 more", text)
+        self.assertEqual(text.count("*Part* "), notify.MAX_PARTS)
+        self.assertIn("_122 more failing parts not shown: see <https://github.com/o/r/actions/runs/7|the run>._", text)
+        self.assertNotIn("part006", text)
+        self.assertNotIn("<!channel>", text)
+        self.assertEqual(text.count("```") % 2, 0)  # every code block closed
+        # Labels are cut to LABEL_CHARS.
+        self.assertIn(f"`part000-{'a' * (notify.LABEL_CHARS - 9)}…`", text)
+        # Each shown part still shows its log tail, cut and escaped.
+        for section in text.split("*Part* ")[1:]:
+            self.assertIn("&lt;!channel&gt; &amp;", section.split("*Last lines of the job*")[1])
+
+    def test_the_final_bound_drops_whole_sections(self):
+        sections = ["head"] + [f"section {i}\n```\n{'x' * 100}\n```" for i in range(10)]
+        text = notify.within(sections, 500, "_cut_")
+        self.assertLessEqual(len(text), 500)
+        self.assertTrue(text.endswith("\n\n_cut_"))
+        self.assertEqual(text.count("```") % 2, 0)
+        self.assertEqual(notify.within(["a", "b"], 100, "_cut_"), "a\n\nb")
+
+    def test_code_blocks_are_bounded_after_escaping(self):
+        block = notify.code_block(["&" * 200] * 50, 1000)
+        self.assertLessEqual(len(block), 1000 + len("```\n\n```") + len("… 50 more lines\n"))
+        self.assertIn("&amp;", block)
+
+    def test_plain_does_not_end_in_half_an_escape(self):
+        self.assertEqual(notify.plain("ab&cd", limit=4), "`ab…`")
+        self.assertEqual(notify.plain("a" * 50, limit=10), f"`{'a' * 9}…`")
 
     def test_one_job_has_no_part_headings(self):
         text = notify.details_text([(job("inspect_ai", "failure"), "https://x/job", canary_log(), None, "", "")])
@@ -453,14 +502,32 @@ class Planner(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             return result.stderr
 
-        self.assertIn("duplicate variant labels", rejected([{"label": "a"}, {"label": "a"}]))
-        self.assertIn("needs a label", rejected([{"test": "pytest"}]))
-        self.assertIn("needs a label", rejected([{"label": "two words"}]))
-        self.assertIn("needs a label", rejected([{"label": "a(b)"}]))
-        self.assertIn("needs a label", rejected([{"label": "a\n"}]))
+        self.assertIn("duplicate job names inspect_ai (a)", rejected([{"label": "a"}, {"label": "a"}]))
+        for label in (None, "two words", "a(b)", "a\n", "", "-a"):
+            variant = {"label": label} if label is not None else {"test": "pytest"}
+            self.assertIn("must be a string of letters", rejected([variant]))
         self.assertIn("can only set", rejected([{"label": "a", "repo": "evil/repo"}]))
         self.assertIn("non-empty list", rejected([]))
-        self.assertIn("must be letters", rejected([{"label": "a"}], name="inspect ai (x)"))
+        self.assertIn("non-empty list", rejected({"label": "a"}))
+        self.assertIn("must be a string of letters", rejected(["a"]))
+        self.assertIn("must be a string of letters", rejected([{"label": "a"}], name="inspect ai (x)"))
+
+    def test_names_and_labels_must_be_strings(self):
+        """The review's R2: `label: 1` and `label: "1"` both rendered as `a (1)`."""
+        for label in (1, True, 1.5):
+            result = self.run_plan([{**self.VARIANTS, "variants": [{"label": label}, {"label": str(label)}]}])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(f"variant label {label!r} must be a string", result.stderr)
+        for name in (1, True, None):
+            result = self.run_plan([{"name": name, "repo": "o/r", "cadence": "2h"}])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(f"canary name {name!r} must be a string", result.stderr)
+        self.assertEqual([e["name"] for e in self.matrix([{**self.VARIANTS, "variants": [{"label": "1"}, {"label": "2"}]}])], ["inspect_ai (1)", "inspect_ai (2)"])
+
+    def test_every_generated_job_name_parses_back(self):
+        include = self.matrix([self.VARIANTS, {"name": "a.b-c_1", "repo": "o/r", "cadence": "2h"}])
+        for entry in include:
+            self.assertEqual(notify.canary_and_part(entry["name"]), (entry["canary"], entry.get("label")))
         # The same label in two canaries is fine.
         other = {**self.VARIANTS, "name": "other", "repo": "o/other"}
         self.assertEqual(len(self.matrix([self.VARIANTS, other])), 4)
@@ -718,6 +785,16 @@ class Main(unittest.TestCase):
         posts = self.run_main(runs, self.WEBHOOK)
         self.assertEqual(len(posts), 1)
         self.assertIn("Canary `a` is failing on the newest releases (`y`).", posts[0][1]["text"])
+
+    def test_the_alert_names_at_most_max_parts(self):
+        runs = {100: [job(f"a (p{i}-{'x' * 60})", "failure", id=i, run_id=100) for i in range(20)], 99: [job("a (p0)", "success", run_id=99)]}
+        posts = self.run_main(runs, self.BOT)
+        self.assertEqual(len(posts), 2)
+        alert, reply = posts[0][1]["text"], posts[1][1]["text"]
+        self.assertIn("and 14 more).", alert)
+        self.assertEqual(alert.count("`p"), notify.MAX_PARTS)
+        self.assertLess(len(alert), 1000)
+        self.assertIn("14 more failing parts not shown: see <https://github.com/o/r/actions/runs/100|the run>", reply)
 
     def test_a_canary_staying_red_is_quiet_whichever_part_fails(self):
         runs = {100: [job("a (x)", "success", run_id=100), job("a (y)", "failure", run_id=100)], 99: [job("a (x)", "failure", run_id=99), job("a (y)", "success", run_id=99)]}
