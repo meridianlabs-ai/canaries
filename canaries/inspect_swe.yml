@@ -1,0 +1,20 @@
+# inspect_swe's full suite, slow tests included (Docker sandbox installs, agent
+# evals), on the newest releases of everything. Tests that need provider keys
+# skip themselves here. Mirrors inspect-swe-nightly-tests.yml in
+# meridianlabs-ai/actions, minus the keys.
+name: inspect_swe
+repo: meridianlabs-ai/inspect_swe
+ref: main
+cadence: nightly
+python: "3.11"
+timeout-minutes: 120
+install: |
+  uv venv
+  # pytest-timeout and pytest-xdist aren't in the dev extra; google-genai lets
+  # inspect_ai's Google provider import, so the gemini_cli tests skip cleanly.
+  uv pip install --exclude-newer false -e ".[dev]" pytest-timeout pytest-xdist google-genai
+test: |
+  # Plain eval output keeps rich panels and progress bars out of the log.
+  export INSPECT_DISPLAY=plain
+  uv run --no-sync pytest --runslow -n auto --timeout=900 --timeout-method=signal \
+    --durations=15 --tb=short -o log_level=warning
