@@ -15,6 +15,8 @@ entries = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 names = [e["name"] for e in entries]
 if len(names) != len(set(names)):
     sys.exit("duplicate canary names in canaries/")
+if {"plan", "notify"} & set(names):
+    sys.exit("plan and notify are the workflow's own job names; a canary can't use them")
 
 only = os.environ.get("ONLY", "").strip()
 schedule = os.environ.get("SCHEDULE", "")

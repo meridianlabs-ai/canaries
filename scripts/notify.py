@@ -26,11 +26,17 @@ from datetime import datetime, timedelta
 
 RED = {"failure", "timed_out"}
 GREEN = {"success"}
-NOT_CANARIES = {"notify"}  # jobs in the workflow that aren't canaries
-HISTORY_RUNS = 100  # earlier scheduled runs searched for a canary's last result
+PLAN_JOB = "plan"
+NOT_CANARIES = {PLAN_JOB, "notify"}  # jobs in the workflow that aren't canaries
+HISTORY_PAGE = 100
+HISTORY_LIMIT = 400  # earlier scheduled runs searched for a canary's last result (about a month)
 
 LOG_TAIL_LINES = 40
 LINE_CHARS = 300
+NAME_CHARS = 80
+MAX_TESTS = 100
+LOG_HEAD_BYTES = 8 << 20  # a log's first and last bytes kept; the middle of a huge log is dropped
+LOG_TAIL_BYTES = 24 << 20
 TESTS_CHARS = 1200
 LOG_CHARS = 3000
 VERSIONS_CHARS = 1500
@@ -39,15 +45,26 @@ UNTRUSTED = "Untrusted log output from a run that installed unreviewed packages.
 TESTED_MARKER = "canary-tested: "
 VERSIONS_STEP = "Installed versions"
 
+# Lines the runner itself writes when a step fails, times out or is cancelled.
+RUNNER_FAILED = (
+    "##[error]Process completed with exit code",
+    "##[error]The operation was canceled.",
+    "##[error]The job running on runner",
+)
+
 TIMESTAMP = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.\d+)?Z ?")
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 TESTED = re.compile(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})$")
 FAILED_TEST = re.compile(r"^(?:FAILED|ERROR) (\S+)")
-PACKAGE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s+(\S+)")
+PACKAGE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s+(\d\S*)")
 
 
 # --- state ------------------------------------------------------------------
+
+
+class HistoryLimit(Exception):
+    """The search for a canary's earlier result reached HISTORY_LIMIT runs."""
 
 
 def state(conclusion):
@@ -62,7 +79,9 @@ def state(conclusion):
 def previous_job(name, history, want=("red", "green")):
     """The newest job named `name` in `history` whose state is in `want`.
 
-    `history` is an iterable of job lists, newest run first.
+    `history` is an iterable of job lists, newest run first. None means the
+    history ran out without one; GitHub.history raises HistoryLimit instead
+    when it stops searching before the history runs out.
     """
     for jobs in history:
         for job in jobs:
@@ -74,8 +93,9 @@ def previous_job(name, history, want=("red", "green")):
 def changed(job, previous):
     """Whether `job` differs in state from `previous` (None: never ran before).
 
-    A canary with no earlier result counts as previously green, so a new
-    canary alerts on its first failure and stays quiet while it passes.
+    A canary with no earlier result in the whole history counts as previously
+    green, so a new canary alerts on its first failure and stays quiet while
+    it passes.
     """
     before = state(previous["conclusion"]) if previous else "green"
     return state(job["conclusion"]) != before
@@ -92,6 +112,18 @@ def slack_escape(text):
     block the text sits in, so they become quotes.
     """
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("`", "'")
+
+
+def plain(name):
+    """A job or step name for display: one line, no markup, bounded.
+
+    Shown in an inline code span, where Slack applies no formatting, so the
+    underscores in names like inspect_ai stay as they are.
+    """
+    name = slack_escape(re.sub(r"[\x00-\x1f\x7f]+", " ", name)).replace("*", "").replace("~", "").strip()
+    if len(name) > NAME_CHARS:
+        name = name[: NAME_CHARS - 1] + "…"
+    return f"`{name}`"
 
 
 def clean(line):
@@ -138,6 +170,14 @@ def has_header(step):
     return step.get("conclusion") != "skipped" and name not in ("Set up job", "Complete job") and not name.startswith("Post ")
 
 
+def line_text(line):
+    return TIMESTAMP.sub("", line, count=1)
+
+
+def runner_failed(line):
+    return line_text(line).startswith(RUNNER_FAILED)
+
+
 def step_lines(log, step, steps=()):
     """The raw log lines a step wrote.
 
@@ -145,50 +185,56 @@ def step_lines(log, step, steps=()):
     start to its end take in the neighbouring steps' lines from the same
     seconds. Within that window the step starts at its own `##[group]Run`
     header, after those of the earlier `steps` that started in the same
-    second, and ends at the next header or at the post-job cleanup, which
-    logs no header.
+    second. A failed step ends at the runner's failure line. Otherwise the
+    step ends at a header logged no earlier than the next step's start, or at
+    the post-job cleanup; a group the step's own output opens (`::group::`)
+    looks like a header, so an earlier one doesn't end it.
     """
     if not step.get("started_at") or not step.get("completed_at"):
         return []
     start = parse_time(step["started_at"])
     end = parse_time(step["completed_at"]) + timedelta(seconds=1)
-    lines, current = [], None
+    lines, times, current = [], [], None
     for line in log.splitlines():
         match = TIMESTAMP.match(line)
         if match:
             current = datetime.fromisoformat(match.group(1))
         if current is not None and start <= current < end:
             lines.append(line)
+            times.append(current)
         elif current is not None and current >= end:
             break
-    earlier = sum(
-        1
-        for s in steps
-        if s.get("number", 0) < step.get("number", 0) and s.get("started_at") == step["started_at"] and has_header(s)
-    )
+    number = step.get("number", 0)
+    earlier = sum(1 for s in steps if s.get("number", 0) < number and s.get("started_at") == step["started_at"] and has_header(s))
     headers = [i for i, line in enumerate(lines) if is_header(line)]
     if len(headers) > earlier:
-        lines = lines[headers[earlier] :]
+        lines, times = lines[headers[earlier] :], times[headers[earlier] :]
+
+    if step.get("conclusion") in ("failure", "cancelled"):
+        for i, line in enumerate(lines):
+            if runner_failed(line):
+                return lines[: i + 1]
+    following = [s for s in steps if s.get("number", 0) > number and has_header(s) and s.get("started_at")]
+    next_start = parse_time(min(following, key=lambda s: s["number"])["started_at"]) if following else None
     for i, line in enumerate(lines[1:], 1):
-        if is_header(line) or TIMESTAMP.sub("", line, count=1) == "Post job cleanup.":
+        if line_text(line) == "Post job cleanup.":
+            return lines[:i]
+        if next_start is not None and is_header(line) and times[i] >= next_start:
             return lines[:i]
     return lines
 
 
 def output_lines(lines):
-    """Step lines with the runner's group markers and command header removed."""
-    out, in_header = [], False
+    """Step lines without the step's command header and the runner's group markers."""
+    if lines and is_header(lines[0]):
+        ends = [i for i, line in enumerate(lines) if line_text(line).startswith("##[endgroup]")]
+        lines = lines[ends[0] + 1 :] if ends else []
+    out = []
     for line in lines:
         text = clean(line)
-        if text.startswith("##[group]Run "):
-            in_header = True
-            continue
         if text.startswith("##[endgroup]"):
-            in_header = False
             continue
-        if in_header:
-            continue
-        out.append(text.removeprefix("##[error]"))
+        out.append(text.removeprefix("##[group]").removeprefix("##[error]"))
     return out
 
 
@@ -202,14 +248,19 @@ def tested_commit(log):
     return None
 
 
-def failed_tests(lines):
-    """Test ids from pytest's `-ra` summary (FAILED/ERROR lines), in order, unique."""
+def failed_tests(lines, limit=MAX_TESTS):
+    """Test ids from pytest's `-ra` summary (FAILED/ERROR lines), in order, unique.
+
+    Returns (ids, more): at most `limit` ids, and whether there were more.
+    """
     tests = []
     for line in lines:
         match = FAILED_TEST.match(line)
         if match and match.group(1) not in tests:
+            if len(tests) >= limit:
+                return tests, True
             tests.append(match.group(1))
-    return tests
+    return tests, False
 
 
 def parse_versions(lines):
@@ -264,35 +315,51 @@ def find_step(job, name):
 
 def alert_text(name, red, job_url, commit):
     """The channel message: canary, what it tested, and the run."""
-    name = slack_escape(name)
     if red:
-        head = f":red_circle: Canary *{name}* is failing on the newest releases."
+        head = f":red_circle: Canary {plain(name)} is failing on the newest releases."
     else:
-        head = f":large_green_circle: Canary *{name}* recovered."
+        head = f":large_green_circle: Canary {plain(name)} recovered."
     if commit:
         repo, sha = commit
         head += f" Tested <https://github.com/{repo}/commit/{sha}|{repo}@{sha[:10]}>."
     return f"{head} <{job_url}|Run log>"
 
 
+def planning_failed_text(job_url):
+    return f":warning: Canary planning failed, so no canaries ran. <{job_url}|Run log>"
+
+
+def job_lines(log):
+    """The whole job's lines, up to the post-job cleanup."""
+    lines = log.splitlines()
+    for i, line in enumerate(lines):
+        if line_text(line) == "Post job cleanup.":
+            return lines[:i]
+    return lines
+
+
 def details_text(job, log, green_job, green_log, green_url):
     """The threaded reply for a canary that turned red."""
     parts = [f"_{UNTRUSTED}_"]
     step = failing_step(job)
-    step_output = output_lines(step_lines(log, step, job["steps"])) if step else []
-    lines = step_output or output_lines(log.splitlines())
+    raw = step_lines(log, step, job["steps"]) if step else []
+    if any(runner_failed(line) for line in raw):
+        lines, where = output_lines(raw), plain(step["name"])
+    else:
+        # The step wasn't found with the runner's failure line; use the whole job.
+        lines, where = output_lines(job_lines(log)), "the job"
 
-    tests = failed_tests(step_output)
+    tests, more = failed_tests(lines)
     if tests:
-        parts.append(f"*Failed tests* ({len(tests)}):\n" + code_block(tests, TESTS_CHARS))
+        count = f"{len(tests)}+" if more else str(len(tests))
+        parts.append(f"*Failed tests* ({count}):\n" + code_block(tests, TESTS_CHARS))
 
-    where = f'"{slack_escape(step["name"])}"' if step else "the job"
     # pytest -ra lists every skipped test after the failures; leave those out.
     tail = [line for line in lines if line.strip() and not line.startswith("SKIPPED [")][-LOG_TAIL_LINES:]
     parts.append(f"*Last lines of {where}:*\n" + code_block(tail, LOG_CHARS, keep="tail"))
 
     if green_job is None:
-        parts.append("*Versions:* no earlier passing run to compare with.")
+        parts.append("*Versions:* no earlier passing run found to compare with.")
     else:
         old = parse_versions(output_lines(step_lines(green_log, find_step(green_job, VERSIONS_STEP) or {}, green_job["steps"])))
         new = parse_versions(output_lines(step_lines(log, find_step(job, VERSIONS_STEP) or {}, job["steps"])))
@@ -315,16 +382,38 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def request(url, data=None, headers=None, opener=urllib.request.urlopen):
+def read_bounded(response, head=LOG_HEAD_BYTES, tail=LOG_TAIL_BYTES):
+    """A response's first `head` and last `tail` bytes, read in chunks.
+
+    A log's commit line and installed versions are near its start and the
+    failure near its end; anything dropped between them is replaced by a
+    line saying so.
+    """
+    first = response.read(head)
+    rest, dropped = bytearray(), 0
+    while chunk := response.read(1 << 20):
+        rest += chunk
+        if len(rest) > tail:
+            dropped += len(rest) - tail
+            del rest[: len(rest) - tail]
+    if dropped:
+        cut = rest.find(b"\n") + 1
+        dropped += cut
+        rest = f"\n… {dropped} bytes of log left out …\n".encode() + rest[cut:]
+    return bytes(first + rest)
+
+
+def request(url, data=None, headers=None, opener=urllib.request.urlopen, read=lambda r: r.read()):
     req = urllib.request.Request(url, data=data, headers=headers or {})
     with opener(req, timeout=60) as response:
-        return response.read().decode("utf-8", errors="replace")
+        return read(response).decode("utf-8", errors="replace")
 
 
 class GitHub:
     def __init__(self, api, repo, token):
         self.api, self.repo, self.token = api, repo, token
         self._jobs = {}
+        self._runs, self._exhausted = [], False
 
     def headers(self):
         return {
@@ -348,29 +437,53 @@ class GitHub:
             self._jobs[run_id] = jobs
         return self._jobs[run_id]
 
-    def earlier_scheduled_runs(self, run):
-        """Completed scheduled runs of this workflow created before `run`, newest first."""
+    def _fetch_earlier(self, run):
+        """Adds the next page of scheduled runs created before the oldest seen so far.
+
+        Pages go by creation time rather than page number, so runs started
+        while paging (or re-runs, which keep their creation time) can't shift
+        the pages. Runs still in progress are included: their finished jobs
+        have results, which matters when a nightly and a 2h run overlap.
+        """
+        before = self._runs[-1]["created_at"] if self._runs else run["created_at"]
+        seen = {run["id"]} | {r["id"] for r in self._runs}
         data = self.get(
             f"actions/workflows/{run['workflow_id']}/runs"
-            f"?event=schedule&status=completed&per_page={HISTORY_RUNS}"
+            f"?event=schedule&per_page={HISTORY_PAGE}&created=%3C%3D{before}"
         )
-        created = parse_time(run["created_at"])
-        return [r for r in data["workflow_runs"] if r["id"] != run["id"] and parse_time(r["created_at"]) < created]
+        new = [r for r in data["workflow_runs"] if r["id"] not in seen]
+        self._runs += new
+        self._exhausted = not new
 
-    def history(self, runs):
-        for r in runs:
-            yield self.jobs(r["id"])
+    def history(self, run):
+        """Job lists of the scheduled runs created before `run`, newest first.
+
+        Ends when the history does. Raises HistoryLimit instead of searching
+        more than HISTORY_LIMIT runs.
+        """
+        i = 0
+        while True:
+            if i == len(self._runs):
+                if self._exhausted:
+                    return
+                self._fetch_earlier(run)
+                continue
+            if i == HISTORY_LIMIT:
+                raise HistoryLimit()
+            yield self.jobs(self._runs[i]["id"])
+            i += 1
 
     def log(self, job_id):
         """A job's log. GitHub answers with a redirect to storage, which is
         followed without the token."""
         opener = urllib.request.build_opener(NoRedirect).open
         try:
-            return request(f"{self.api}/repos/{self.repo}/actions/jobs/{job_id}/logs", headers=self.headers(), opener=opener)
+            url = f"{self.api}/repos/{self.repo}/actions/jobs/{job_id}/logs"
+            return request(url, headers=self.headers(), opener=opener, read=read_bounded)
         except urllib.error.HTTPError as e:
             if e.code not in (301, 302, 303, 307, 308):
                 raise
-            return request(e.headers["Location"])
+            return request(e.headers["Location"], read=read_bounded)
 
 
 class Slack:
@@ -431,11 +544,21 @@ def main():
 
     github = GitHub(env["GITHUB_API_URL"], repo, env["GH_TOKEN"])
     run = github.get(f"actions/runs/{run_id}")
-    current = [j for j in github.jobs(run_id) if j["name"] not in NOT_CANARIES and state(j["conclusion"])]
-    earlier = github.earlier_scheduled_runs(run)
+    jobs = github.jobs(run_id)
+    # A planning failure isn't a canary's state; it says so on every run it happens.
+    plan = next((j for j in jobs if j["name"] == PLAN_JOB), None)
+    if plan and state(plan["conclusion"]) == "red":
+        print("Planning failed.")
+        slack.post(planning_failed_text(job_url(server, repo, plan)))
+        return
+    current = [j for j in jobs if j["name"] not in NOT_CANARIES and state(j["conclusion"])]
 
     for job in current:
-        previous = previous_job(job["name"], github.history(earlier))
+        try:
+            previous = previous_job(job["name"], github.history(run))
+        except HistoryLimit:
+            print(f"::notice::{job['name']}: no result in the last {HISTORY_LIMIT} scheduled runs to compare with; not alerting.")
+            continue
         if not changed(job, previous):
             print(f"{job['name']}: still {state(job['conclusion'])}")
             continue
@@ -451,7 +574,10 @@ def main():
         if not (red and ts):
             continue
         try:
-            green = previous_job(job["name"], github.history(earlier), want=("green",))
+            try:
+                green = previous_job(job["name"], github.history(run), want=("green",))
+            except HistoryLimit:
+                green = None
             green_log = github.log(green["id"]) if green else ""
             green_url = job_url(server, repo, green) if green else ""
             reply = details_text(job, log, green, green_log, green_url)

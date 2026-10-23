@@ -1,8 +1,14 @@
 """Tests for notify.py: python3 -m unittest discover -s scripts"""
 
+import io
 import json
 import os
+import subprocess
+import sys
+import tempfile
 import unittest
+from datetime import datetime, timedelta
+from urllib.parse import parse_qs, urlsplit
 from unittest import mock
 
 import notify
@@ -24,7 +30,7 @@ def line(time, text):
     return f"2026-10-23T02:{time}.1234567Z {text}"
 
 
-def canary_log(sha=SHA, versions=(("anyio", "4.11.0"), ("inspect-ai", "0.3.290")), test_output=()):
+def canary_log(sha=SHA, versions=(("anyio", "4.11.0"), ("inspect-ai", "0.3.290")), test_output=(), install_output=()):
     """A job log shaped like GitHub's, with steps at fixed times."""
     lines = [
         line("00:00", "##[group]Run echo \"canary-tested: UKGovernmentBEIS/inspect_ai@$(git rev-parse HEAD)\""),
@@ -34,6 +40,7 @@ def canary_log(sha=SHA, versions=(("anyio", "4.11.0"), ("inspect-ai", "0.3.290")
         line("00:00", "##[group]Run uv venv"),
         line("00:00", "##[endgroup]"),
         line("00:05", "Installed 300 packages"),
+        *[line("00:09", text) for text in install_output],
         line("00:09", "##[group]Run uv pip list"),
         line("00:09", f"{ESC}[36;1muv pip list{ESC}[0m"),
         line("00:09", "##[endgroup]"),
@@ -143,11 +150,12 @@ class Truncation(unittest.TestCase):
         output += ["y" * 2000] * 200
         log = canary_log(test_output=output)
         failing = job("inspect_ai", "failure", steps=CANARY_STEPS + [step("Test", "failure", "00:09", "06:31", 5)])
-        green = job("inspect_ai", "success", id=2, steps=CANARY_STEPS)
+        green = job("inspect_ai", "success", id=2, steps=CANARY_STEPS + [step("Test", "success", "00:09", "06:31", 5)])
         text = notify.details_text(failing, log, green, canary_log(), "https://x/run")
         budget = notify.TESTS_CHARS + notify.LOG_CHARS + notify.VERSIONS_CHARS
         self.assertLess(len(text), budget + 1000)
-        self.assertIn("(500)", text)
+        self.assertIn("*Failed tests* (100+)", text)
+        self.assertIn("(0):", text.split("Versions")[1])
         self.assertIn("more lines", text)
 
 
@@ -166,7 +174,14 @@ class Logs(unittest.TestCase):
             "ERROR tests/test_b.py::test_three - fixture",
             "FAILED tests/test_a.py::test_two - AssertionError: no",
         ]
-        self.assertEqual(notify.failed_tests(lines), ["tests/test_a.py::test_two", "tests/test_b.py::test_three"])
+        self.assertEqual(notify.failed_tests(lines), (["tests/test_a.py::test_two", "tests/test_b.py::test_three"], False))
+
+    def test_failed_tests_are_bounded(self):
+        lines = [f"FAILED tests/t.py::test_{i}" for i in range(150)]
+        tests, more = notify.failed_tests(lines)
+        self.assertEqual(len(tests), notify.MAX_TESTS)
+        self.assertTrue(more)
+        self.assertEqual(notify.failed_tests(lines[:3], limit=3), (["tests/t.py::test_0", "tests/t.py::test_1", "tests/t.py::test_2"], False))
 
     def test_version_diff(self):
         old = notify.parse_versions(
@@ -196,7 +211,7 @@ class Logs(unittest.TestCase):
         text = notify.details_text(failing, log, green, green_log, "https://github.com/o/r/actions/runs/9/job/2")
         self.assertTrue(text.startswith(f"_{notify.UNTRUSTED}_"))
         self.assertIn("```\ntests/test_a.py::test_two\n```", text)
-        self.assertIn('*Last lines of "Test":*', text)
+        self.assertIn("*Last lines of `Test`:*", text)
         self.assertIn("FAILED tests/test_a.py::test_two - &lt;!channel&gt; &amp; 'x'", text)
         self.assertIn("Process completed with exit code 1.", text)
         self.assertNotIn("Post job cleanup.", text)
@@ -208,23 +223,130 @@ class Logs(unittest.TestCase):
 
     def test_details_without_a_passing_run(self):
         failing = job("c", "failure", steps=[step("Install the newest releases", "failure", "00:00", "00:09", 3)])
-        text = notify.details_text(failing, canary_log(), None, "", "")
-        self.assertIn('"Install the newest releases"', text)
+        log = canary_log(install_output=["error: No solution found", "##[error]Process completed with exit code 1."])
+        text = notify.details_text(failing, log, None, "", "")
+        self.assertIn("`Install the newest releases`", text)
+        self.assertIn("error: No solution found", text)
+        self.assertNotIn("Package", text)
         self.assertIn("no earlier passing run", text)
         self.assertNotIn("Failed tests", text)
 
     def test_details_for_a_timeout(self):
         failing = job("c", "failure", steps=CANARY_STEPS + [step("Test", "cancelled", "00:09", "06:31", 5)])
         text = notify.details_text(failing, canary_log(test_output=["still running"]), None, "", "")
-        self.assertIn('"Test"', text)
+        self.assertIn("`Test`", text)
         self.assertIn("still running", text)
+
+
+class NestedGroups(unittest.TestCase):
+    """A step's own output can open groups titled `Run …` (F2)."""
+
+    def test_nested_run_group_does_not_end_the_failing_step(self):
+        output = ["start tests", "##[group]Run nested test suite", "FAILED tests/real.py::test_x - boom", "##[endgroup]", "= 1 failed ="]
+        failing = job("c", "failure", steps=CANARY_STEPS + [step("Test", "failure", "00:09", "06:31", 5)])
+        text = notify.details_text(failing, canary_log(test_output=output), None, "", "")
+        self.assertIn("```\ntests/real.py::test_x\n```", text)
+        self.assertIn("*Last lines of `Test`:*", text)
+        self.assertIn("Run nested test suite", text)
+        self.assertIn("Process completed with exit code 1.", text)
+
+    def test_nested_group_in_the_second_the_next_step_starts(self):
+        # The install fails in the same second as its nested group and the next step's header.
+        install = ["##[group]Run nested build", "error: No solution found", "##[endgroup]", "##[error]Process completed with exit code 1."]
+        steps = [
+            step("Record what we tested", "success", "00:00", "00:00", 2),
+            step("Install the newest releases", "failure", "00:00", "00:09", 3),
+            step("Installed versions", "success", "00:09", "00:09", 4),
+        ]
+        failing = job("c", "failure", steps=steps)
+        text = notify.details_text(failing, canary_log(install_output=install), None, "", "")
+        self.assertIn("*Last lines of `Install the newest releases`:*", text)
+        self.assertIn("error: No solution found", text)
+        self.assertNotIn("Package", text)
+
+    def test_successful_step_keeps_nested_groups_until_the_next_step(self):
+        log = "\n".join(
+            [
+                line("00:00", "##[group]Run make"),
+                line("00:00", "make"),
+                line("00:00", "##[endgroup]"),
+                line("00:01", "##[group]Run nested"),
+                line("00:02", "inside"),
+                line("00:02", "##[endgroup]"),
+                line("00:03", "after"),
+                line("00:04", "##[group]Run next step"),
+                line("00:04", "next output"),
+            ]
+        )
+        steps = [step("Make", "success", "00:00", "00:04", 1), step("Next", "success", "00:04", "00:04", 2)]
+        self.assertEqual(notify.output_lines(notify.step_lines(log, steps[0], steps)), ["Run nested", "inside", "after"])
+
+    def test_falls_back_to_the_whole_job_without_the_runner_failure_line(self):
+        # Step times that miss the failure (e.g. clock skew) leave the step without its failure line.
+        failing = job("c", "failure", steps=CANARY_STEPS + [step("Test", "failure", "00:09", "00:10", 5)])
+        output = ["FAILED tests/t.py::test_late - boom"]
+        text = notify.details_text(failing, canary_log(test_output=output), None, "", "")
+        self.assertIn("*Last lines of the job:*", text)
+        self.assertIn("tests/t.py::test_late", text)
+        self.assertNotIn("Post job cleanup.", text)
+
+
+class Names(unittest.TestCase):
+    def test_plain_names(self):
+        self.assertEqual(notify.plain("inspect_ai"), "`inspect_ai`")
+        self.assertEqual(notify.plain("a*b*~c~\n<!here> & `x`"), "`abc &lt;!here&gt; &amp; 'x'`")
+        long = notify.plain("n" * 500)
+        self.assertEqual(len(long), notify.NAME_CHARS + 2)
+        self.assertTrue(long.endswith("…`"))
+
+    def test_names_in_messages_are_plain(self):
+        url = "https://github.com/o/r/actions/runs/1/job/2"
+        text = notify.alert_text("*bold*\n<!channel>", True, url, None)
+        self.assertIn("Canary `bold &lt;!channel&gt;` is failing", text)
+        failing = job("c", "failure", steps=CANARY_STEPS + [step("_Test_ *now*", "failure", "00:09", "06:31", 5)])
+        self.assertIn("*Last lines of `_Test_ now`:*", notify.details_text(failing, canary_log(), None, "", ""))
+
+
+class BoundedRead(unittest.TestCase):
+    def test_small_logs_are_read_whole(self):
+        data = b"line 1\nline 2\n"
+        self.assertEqual(notify.read_bounded(io.BytesIO(data), head=100, tail=100), data)
+
+    def test_large_logs_keep_head_and_tail(self):
+        data = b"".join(f"line {i}\n".encode() for i in range(100000))
+        kept = notify.read_bounded(io.BytesIO(data), head=1000, tail=2000)
+        self.assertLess(len(kept), 3100)
+        self.assertTrue(kept.startswith(b"line 0\n"))
+        self.assertTrue(kept.endswith(b"line 99999\n"))
+        self.assertIn(b"bytes of log left out", kept)
+        middle = kept.split(b"left out \xe2\x80\xa6\n", 1)[1]
+        self.assertTrue(middle.startswith(b"line "))  # the tail starts on a whole line
+
+
+class Planner(unittest.TestCase):
+    def plan(self, names):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            for name in names:
+                f.write(json.dumps({"name": name, "cadence": "2h"}) + "\n")
+        try:
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plan.py")
+            return subprocess.run([sys.executable, script, f.name], capture_output=True, text=True, env={})
+        finally:
+            os.unlink(f.name)
+
+    def test_workflow_job_names_are_reserved(self):
+        self.assertEqual(self.plan(["inspect_ai"]).returncode, 0)
+        for name in ("plan", "notify"):
+            result = self.plan(["inspect_ai", name])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("job names", result.stderr)
 
 
 class Messages(unittest.TestCase):
     def test_alert_text(self):
         url = "https://github.com/o/r/actions/runs/1/job/2"
         red = notify.alert_text("inspect_ai", True, url, ("UKGovernmentBEIS/inspect_ai", SHA))
-        self.assertIn("*inspect_ai* is failing", red)
+        self.assertIn("Canary `inspect_ai` is failing", red)
         self.assertIn(f"<https://github.com/UKGovernmentBEIS/inspect_ai/commit/{SHA}|UKGovernmentBEIS/inspect_ai@{SHA[:10]}>", red)
         self.assertIn(f"<{url}|Run log>", red)
         green = notify.alert_text("inspect_ai", False, url, None)
@@ -232,28 +354,42 @@ class Messages(unittest.TestCase):
         self.assertNotIn("Tested", green)
 
 
+BASE = datetime(2026, 10, 23, 4)
+
+
+def created(n):
+    """Creation time of the n-th run back from the current one, two hours apart."""
+    return (BASE - timedelta(hours=2 * n)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class FakeServices:
     """Answers notify.request() for the GitHub and Slack calls main() makes."""
 
     def __init__(self, runs):
-        self.runs = runs  # {run_id: [jobs]}, current run first
+        self.runs = runs  # {run_id: [jobs]}, current run first, then older runs
+        self.created = {run_id: created(n) for n, run_id in enumerate(runs)}
         self.logs = {}
         self.posts = []
+        self.listings = []
 
-    def __call__(self, url, data=None, headers=None, opener=None):
+    def __call__(self, url, data=None, headers=None, opener=None, read=None):
         if data is not None:
             body = json.loads(data)
             self.posts.append((url, body))
             return json.dumps({"ok": True, "ts": f"{len(self.posts)}.0"})
-        path = url.split("/repos/o/r/", 1)[1]
-        if path.startswith("actions/runs/") and path.endswith("jobs?per_page=100&page=1"):
+        parts = urlsplit(url)
+        path, query = parts.path.split("/repos/o/r/", 1)[1], parse_qs(parts.query)
+        if path.startswith("actions/runs/") and path.endswith("/jobs"):
             jobs = self.runs[int(path.split("/")[2])]
             return json.dumps({"total_count": len(jobs), "jobs": jobs})
         if path.startswith("actions/runs/"):
-            return json.dumps({"id": 100, "workflow_id": 7, "created_at": "2026-10-23T04:00:00Z"})
-        if path.startswith("actions/workflows/7/runs"):
-            runs = [{"id": i, "created_at": f"2026-10-23T0{4 - n}:00:00Z"} for n, i in enumerate(self.runs)]
-            return json.dumps({"workflow_runs": runs})
+            return json.dumps({"id": 100, "workflow_id": 7, "created_at": self.created[100]})
+        if path == "actions/workflows/7/runs":
+            self.listings.append(query)
+            bound = query["created"][0].removeprefix("<=")
+            runs = [{"id": i, "created_at": c} for i, c in self.created.items() if c <= bound]
+            runs.sort(key=lambda r: r["created_at"], reverse=True)
+            return json.dumps({"workflow_runs": runs[: int(query["per_page"][0])]})
         if path.startswith("actions/jobs/"):
             return self.logs.get(int(path.split("/")[2]), "")
         raise AssertionError(url)
@@ -288,7 +424,7 @@ class Main(unittest.TestCase):
         (url, alert), (_, reply) = posts
         self.assertEqual(url, "https://slack.com/api/chat.postMessage")
         self.assertEqual(alert["channel"], "C1")
-        self.assertIn("*inspect_ai* is failing", alert["text"])
+        self.assertIn("Canary `inspect_ai` is failing", alert["text"])
         self.assertIn("https://github.com/o/r/actions/runs/100/job/2", alert["text"])
         self.assertEqual(reply["thread_ts"], "1.0")
         self.assertIn("tests/t.py::test_x", reply["text"])
@@ -308,8 +444,71 @@ class Main(unittest.TestCase):
         self.assertEqual(len(posts), 1)
         url, body = posts[0]
         self.assertEqual(url, "https://hooks.example/x")
-        self.assertIn("*a* recovered", body["text"])
+        self.assertIn("Canary `a` recovered", body["text"])
         self.assertNotIn("channel", body)
+
+    def test_planning_failure_posts_one_plain_message(self):
+        runs = {
+            100: [job("plan", "failure", id=1, run_id=100), job("matrix.name", "skipped", id=2, run_id=100)],
+            99: [job("plan", "success", id=3, run_id=99), job("inspect_ai", "success", id=4, run_id=99)],
+        }
+        posts = self.run_main(runs, {"SLACK_WEBHOOK_URL": "https://hooks.example/x"})
+        self.assertEqual(len(posts), 1)
+        text = posts[0][1]["text"]
+        self.assertIn("Canary planning failed, so no canaries ran.", text)
+        self.assertIn("https://github.com/o/r/actions/runs/100/job/1", text)
+        self.assertNotIn("`plan`", text)
+
+    def test_planning_recovery_is_not_a_canary_recovery(self):
+        runs = {
+            100: [job("plan", "success", run_id=100), job("inspect_ai", "success", run_id=100)],
+            99: [job("plan", "failure", run_id=99), job("matrix.name", "skipped", run_id=99)],
+            98: [job("plan", "success", run_id=98), job("inspect_ai", "success", run_id=98)],
+        }
+        self.assertEqual(self.run_main(runs, {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}), [])
+
+    def history(self, total, nightly_at, current, other_jobs=True):
+        """The current run plus `total` earlier runs; `nightly` ran only in the run `nightly_at` back."""
+        runs = {100: [job("plan", "success", run_id=100), job("nightly", current, id=1, run_id=100)]}
+        for n in range(1, total + 1):
+            jobs = [job("plan", "success", run_id=1000 + n)]
+            if other_jobs:
+                jobs.append(job("hourly", "success", run_id=1000 + n))
+            if n == nightly_at:
+                jobs.append(job("nightly", "failure", id=5000, run_id=1000 + n))
+            runs[1000 + n] = jobs
+        return runs
+
+    def test_history_pages_back_past_100_runs(self):
+        # Still red: the earlier failure is 130 runs back, beyond the first page.
+        fake_posts = self.run_main(self.history(150, 130, "failure"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"})
+        self.assertEqual(fake_posts, [])
+        # Recovered: the same history, now green, alerts.
+        posts = self.run_main(self.history(150, 130, "success"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"})
+        self.assertEqual(len(posts), 1)
+        self.assertIn("Canary `nightly` recovered", posts[0][1]["text"])
+
+    def test_history_pages_by_creation_time(self):
+        fake = FakeServices(self.history(150, 130, "failure"))
+        with mock.patch.dict(os.environ, {**ENV, "SLACK_WEBHOOK_URL": "https://hooks.example/x"}, clear=True), mock.patch.object(notify, "request", fake):
+            notify.main()
+        bounds = [q["created"][0] for q in fake.listings]
+        self.assertEqual(bounds[0], f"<={created(0)}")
+        # The first page holds the current run and 99 earlier ones; the next starts at the oldest of those.
+        self.assertEqual(bounds[1], f"<={created(99)}")
+        self.assertTrue(all("page" not in q for q in fake.listings))
+
+    def test_exhausted_history_means_a_new_canary(self):
+        posts = self.run_main(self.history(150, None, "failure"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"})
+        self.assertEqual(len(posts), 1)
+        self.assertIn("Canary `nightly` is failing", posts[0][1]["text"])
+        self.assertEqual(self.run_main(self.history(150, None, "success"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}), [])
+
+    def test_history_limit_alerts_neither_way(self):
+        total = notify.HISTORY_LIMIT + 50
+        for current in ("failure", "success"):
+            posts = self.run_main(self.history(total, total, current), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"})
+            self.assertEqual(posts, [], current)
 
     def test_test_message_on_both_paths(self):
         posts = self.run_main({}, {"TEST_SLACK": "true", "SLACK_WEBHOOK_URL": "https://hooks.example/x"})
