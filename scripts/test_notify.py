@@ -324,7 +324,7 @@ class Planner(unittest.TestCase):
     def plan(self, names):
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
             for name in names:
-                f.write(json.dumps({"name": name, "cadence": "2h"}) + "\n")
+                f.write(json.dumps({"name": name, "repo": f"o/{name}", "cadence": "2h"}) + "\n")
         try:
             script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plan.py")
             return subprocess.run([sys.executable, script, f.name], capture_output=True, text=True, env={})
