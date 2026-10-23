@@ -41,13 +41,11 @@ def canary_log(sha=SHA, versions=(("anyio", "4.11.0"), ("inspect-ai", "0.3.290")
         line("00:00", "##[endgroup]"),
         line("00:05", "Installed 300 packages"),
         *[line("00:09", text) for text in install_output],
-        line("00:09", "##[group]Run uv pip list"),
-        line("00:09", f"{ESC}[36;1muv pip list{ESC}[0m"),
+        line("00:09", "##[group]Run uv pip list --format freeze | sed -e 's/==/ /' -e 's/^/canary-installed: /'"),
+        line("00:09", f"{ESC}[36;1muv pip list --format freeze | sed -e 's/==/ /' -e 's/^/canary-installed: /'{ESC}[0m"),
         line("00:09", "##[endgroup]"),
-        line("00:09", "Package            Version  Editable project location"),
-        line("00:09", "------------------ -------- -------------------------"),
     ]
-    lines += [line("00:09", f"{name:<18} {version}") for name, version in versions]
+    lines += [line("00:09", f"canary-installed: {name} {version}") for name, version in versions]
     lines += [
         line("00:09", "##[group]Run uv run --no-sync pytest -ra"),
         line("00:09", "##[endgroup]"),
@@ -160,12 +158,11 @@ class Truncation(unittest.TestCase):
 
 
 class Logs(unittest.TestCase):
-    def test_step_lines_start_at_the_step_header(self):
-        log = canary_log()
-        versions = notify.output_lines(notify.step_lines(log, CANARY_STEPS[3], CANARY_STEPS))
-        self.assertEqual(versions[0].split()[0], "Package")
-        self.assertNotIn("Installed 300 packages", versions)
-        self.assertFalse(any(text.startswith("##[") or text.startswith("uv pip list") for text in versions))
+    def test_output_lines_stop_at_the_post_job_cleanup(self):
+        lines = notify.output_lines(canary_log(test_output=["##[group]Run nested", "inside", "##[endgroup]"]))
+        self.assertEqual(lines[-3:], ["Run nested", "inside", "Process completed with exit code 1."])
+        self.assertNotIn("Post job cleanup.", lines)
+        self.assertFalse(any(text.startswith("##[") for text in lines))
 
     def test_failed_tests(self):
         lines = [
@@ -185,17 +182,17 @@ class Logs(unittest.TestCase):
 
     def test_version_diff(self):
         old = notify.parse_versions(
-            ["Package Version", "------- -------", "anyio 4.10.0", "Pydantic_Core 2.41.0", "gone 1.0", "same 1.0"]
+            ["canary-installed: anyio 4.10.0", "canary-installed: Pydantic_Core 2.41.0", "canary-installed: gone 1.0", "canary-installed: same 1.0"]
         )
         new = notify.parse_versions(
-            ["Package Version", "------- -------", "anyio 4.11.0", "pydantic-core 2.41.0", "added 2.0", "same 1.0"]
+            ["canary-installed: anyio 4.11.0", "canary-installed: pydantic-core 2.41.0", "canary-installed: added 2.0", "canary-installed: same 1.0"]
         )
         self.assertEqual(old["pydantic-core"], "2.41.0")
         self.assertEqual(notify.version_diff(old, new), ["+ added 2.0", "  anyio 4.10.0 → 4.11.0", "- gone 1.0"])
 
-    def test_parse_versions_ignores_lines_before_the_table(self):
-        self.assertEqual(notify.parse_versions(["Resolved 3 packages", "--------- -------", "a 1"]), {"a": "1"})
-        self.assertEqual(notify.parse_versions(["noise 1.0"]), {})
+    def test_parse_versions_reads_only_marker_lines(self):
+        lines = ["Package Version", "------- -------", "anyio 4.11.0", "Run uv pip list", "canary-installed: a 1", "canary-installed: odd line here", "x canary-installed: b 2"]
+        self.assertEqual(notify.parse_versions(lines), {"a": "1"})
 
     def test_details(self):
         output = [
@@ -211,84 +208,84 @@ class Logs(unittest.TestCase):
         text = notify.details_text(failing, log, green, green_log, "https://github.com/o/r/actions/runs/9/job/2")
         self.assertTrue(text.startswith(f"_{notify.UNTRUSTED}_"))
         self.assertIn("```\ntests/test_a.py::test_two\n```", text)
-        self.assertIn("*Last lines of `Test`:*", text)
+        self.assertIn("*Last lines of the job* (failed step `Test`):", text)
         self.assertIn("FAILED tests/test_a.py::test_two - &lt;!channel&gt; &amp; 'x'", text)
         self.assertIn("Process completed with exit code 1.", text)
         self.assertNotIn("Post job cleanup.", text)
         self.assertNotIn("need --runslow", text)
         self.assertNotIn("<!channel>", text)
-        self.assertNotIn("Editable project location", text)  # the versions step's output
+        self.assertNotIn("canary-installed: inspect-ai", text)  # the version list stays out of the tail
         self.assertIn("anyio 4.10.0 → 4.11.0", text)
         self.assertIn("(1):", text)
 
     def test_details_without_a_passing_run(self):
         failing = job("c", "failure", steps=[step("Install the newest releases", "failure", "00:00", "00:09", 3)])
-        log = canary_log(install_output=["error: No solution found", "##[error]Process completed with exit code 1."])
+        log = canary_log(versions=(), install_output=["error: No solution found", "##[error]Process completed with exit code 1."])
         text = notify.details_text(failing, log, None, "", "")
-        self.assertIn("`Install the newest releases`", text)
+        self.assertIn("(failed step `Install the newest releases`)", text)
         self.assertIn("error: No solution found", text)
-        self.assertNotIn("Package", text)
         self.assertIn("no earlier passing run", text)
         self.assertNotIn("Failed tests", text)
+
+    def test_install_failure_against_a_passing_run(self):
+        failing = job("c", "failure", steps=[step("Install the newest releases", "failure", "00:00", "00:09", 3)])
+        log = canary_log(versions=(), install_output=["error: No solution found", "##[error]Process completed with exit code 1."])
+        text = notify.details_text(failing, log, job("c", "success", id=2), canary_log(), "https://x/run")
+        self.assertIn("this run didn't get as far as installing", text)
 
     def test_details_for_a_timeout(self):
         failing = job("c", "failure", steps=CANARY_STEPS + [step("Test", "cancelled", "00:09", "06:31", 5)])
         text = notify.details_text(failing, canary_log(test_output=["still running"]), None, "", "")
-        self.assertIn("`Test`", text)
+        self.assertIn("(failed step `Test`)", text)
         self.assertIn("still running", text)
 
 
 class NestedGroups(unittest.TestCase):
-    """A step's own output can open groups titled `Run …` (F2)."""
+    """Output can open groups titled `Run …`; the log is read whole, so they can't hide anything."""
 
-    def test_nested_run_group_does_not_end_the_failing_step(self):
+    def test_nested_run_group_in_the_failing_step(self):
         output = ["start tests", "##[group]Run nested test suite", "FAILED tests/real.py::test_x - boom", "##[endgroup]", "= 1 failed ="]
         failing = job("c", "failure", steps=CANARY_STEPS + [step("Test", "failure", "00:09", "06:31", 5)])
         text = notify.details_text(failing, canary_log(test_output=output), None, "", "")
         self.assertIn("```\ntests/real.py::test_x\n```", text)
-        self.assertIn("*Last lines of `Test`:*", text)
         self.assertIn("Run nested test suite", text)
         self.assertIn("Process completed with exit code 1.", text)
 
-    def test_nested_group_in_the_second_the_next_step_starts(self):
-        # The install fails in the same second as its nested group and the next step's header.
-        install = ["##[group]Run nested build", "error: No solution found", "##[endgroup]", "##[error]Process completed with exit code 1."]
+    def test_preceding_steps_nested_group_in_the_same_second(self):
+        """The delta review's R1: Install opens a `Run …` group in the second that
+        Installed versions and Test both start; versions must still compare."""
         steps = [
-            step("Record what we tested", "success", "00:00", "00:00", 2),
-            step("Install the newest releases", "failure", "00:00", "00:09", 3),
-            step("Installed versions", "success", "00:09", "00:09", 4),
+            step("Install the newest releases", "success", "00:00", "00:09", 1),
+            step("Installed versions", "success", "00:09", "00:09", 2),
+            step("Test", "failure", "00:09", "00:20", 3),
         ]
-        failing = job("c", "failure", steps=steps)
-        text = notify.details_text(failing, canary_log(install_output=install), None, "", "")
-        self.assertIn("*Last lines of `Install the newest releases`:*", text)
-        self.assertIn("error: No solution found", text)
-        self.assertNotIn("Package", text)
 
-    def test_successful_step_keeps_nested_groups_until_the_next_step(self):
-        log = "\n".join(
-            [
-                line("00:00", "##[group]Run make"),
-                line("00:00", "make"),
-                line("00:00", "##[endgroup]"),
-                line("00:01", "##[group]Run nested"),
-                line("00:02", "inside"),
-                line("00:02", "##[endgroup]"),
-                line("00:03", "after"),
-                line("00:04", "##[group]Run next step"),
-                line("00:04", "next output"),
-            ]
+        def log(version, nested):
+            return "\n".join(
+                [
+                    line("00:00", "##[group]Run install"),
+                    line("00:00", "##[endgroup]"),
+                    line("00:09", "##[group]Run nested build" if nested else "build output"),
+                    line("00:09", "build finished"),
+                    line("00:09", "##[endgroup]"),
+                    line("00:09", "##[group]Run uv pip list --format freeze | sed -e 's/==/ /' -e 's/^/canary-installed: /'"),
+                    line("00:09", "##[endgroup]"),
+                    line("00:09", f"canary-installed: anyio {version}"),
+                    line("00:09", "##[group]Run pytest"),
+                    line("00:09", "##[endgroup]"),
+                    line("00:20", "FAILED tests/a.py::test_x - boom"),
+                    line("00:20", "##[error]Process completed with exit code 1."),
+                ]
+            )
+
+        green_steps = [{**s, "conclusion": "success"} for s in steps]
+        text = notify.details_text(
+            job("c", "failure", steps=steps), log("4.11.0", True), job("c", "success", id=2, steps=green_steps), log("4.10.0", False), "https://x/run"
         )
-        steps = [step("Make", "success", "00:00", "00:04", 1), step("Next", "success", "00:04", "00:04", 2)]
-        self.assertEqual(notify.output_lines(notify.step_lines(log, steps[0], steps)), ["Run nested", "inside", "after"])
-
-    def test_falls_back_to_the_whole_job_without_the_runner_failure_line(self):
-        # Step times that miss the failure (e.g. clock skew) leave the step without its failure line.
-        failing = job("c", "failure", steps=CANARY_STEPS + [step("Test", "failure", "00:09", "00:10", 5)])
-        output = ["FAILED tests/t.py::test_late - boom"]
-        text = notify.details_text(failing, canary_log(test_output=output), None, "", "")
-        self.assertIn("*Last lines of the job:*", text)
-        self.assertIn("tests/t.py::test_late", text)
-        self.assertNotIn("Post job cleanup.", text)
+        self.assertIn("anyio 4.10.0 → 4.11.0", text)
+        self.assertNotIn("didn't get as far as installing", text)
+        self.assertIn("tests/a.py::test_x", text)
+        self.assertNotIn("canary-installed: anyio", text)
 
 
 class Names(unittest.TestCase):
@@ -304,7 +301,7 @@ class Names(unittest.TestCase):
         text = notify.alert_text("*bold*\n<!channel>", True, url, None)
         self.assertIn("Canary `bold &lt;!channel&gt;` is failing", text)
         failing = job("c", "failure", steps=CANARY_STEPS + [step("_Test_ *now*", "failure", "00:09", "06:31", 5)])
-        self.assertIn("*Last lines of `_Test_ now`:*", notify.details_text(failing, canary_log(), None, "", ""))
+        self.assertIn("(failed step `_Test_ now`)", notify.details_text(failing, canary_log(), None, "", ""))
 
 
 class BoundedRead(unittest.TestCase):
@@ -504,11 +501,20 @@ class Main(unittest.TestCase):
         self.assertIn("Canary `nightly` is failing", posts[0][1]["text"])
         self.assertEqual(self.run_main(self.history(150, None, "success"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}), [])
 
-    def test_history_limit_alerts_neither_way(self):
+    def test_no_result_within_the_history_limit_means_a_new_canary(self):
+        """The delta review's R2: past the limit, a new canary's first failure still alerts."""
         total = notify.HISTORY_LIMIT + 50
-        for current in ("failure", "success"):
-            posts = self.run_main(self.history(total, total, current), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"})
-            self.assertEqual(posts, [], current)
+        fake = FakeServices(self.history(total, None, "failure"))
+        with mock.patch.dict(os.environ, {**ENV, "SLACK_WEBHOOK_URL": "https://hooks.example/x"}, clear=True), mock.patch.object(notify, "request", fake):
+            notify.main()
+        self.assertEqual(len(fake.posts), 1)
+        self.assertIn("Canary `nightly` is failing", fake.posts[0][1]["text"])
+        # Its second failure finds the first and stays quiet.
+        runs = self.history(total, 1, "failure")
+        self.assertEqual(self.run_main(runs, {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}), [])
+        # A result beyond the limit isn't searched for: that canary counts as new too.
+        self.assertEqual(len(self.run_main(self.history(total, total, "failure"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"})), 1)
+        self.assertEqual(self.run_main(self.history(total, total, "success"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}), [])
 
     def test_test_message_on_both_paths(self):
         posts = self.run_main({}, {"TEST_SLACK": "true", "SLACK_WEBHOOK_URL": "https://hooks.example/x"})

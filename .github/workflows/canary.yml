@@ -88,9 +88,12 @@ jobs:
       - name: Install the newest releases
         run: ${{ matrix.install }}
 
+      # One `canary-installed: <name> <version>` line per package, which
+      # scripts/notify.py compares with the canary's last passing run.
       - name: Installed versions
         if: ${{ !cancelled() }}
-        run: uv pip list
+        run: |
+          uv pip list --format freeze | sed -e 's/==/ /' -e 's/^/canary-installed: /'
 
       - name: Test
         run: ${{ matrix.test }}
