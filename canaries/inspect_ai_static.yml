@@ -1,0 +1,24 @@
+# inspect_ai's static analysis on the newest releases of everything: the
+# static-analysis job of meridianlabs-ai/actions' inspect-ai-scheduled-tests.yml
+# (the check-only form of `make check`'s ruff and mypy). Newer dependencies
+# can break mypy, which reads their types, in ways the lockfile never sees.
+name: inspect_ai_static
+repo: UKGovernmentBEIS/inspect_ai
+ref: main
+cadence: 2h
+python: "3.11"
+timeout-minutes: 30
+install: |
+  uv venv
+  uv pip install --exclude-newer false -e ".[dev]"
+test: |
+  # Activated rather than `uv run`: src/inspect_tool_support has its own
+  # pyproject.toml, which `uv run` would take as the project.
+  . .venv/bin/activate
+  # Every check runs; the step fails if any did.
+  status=0
+  ruff check || status=1
+  ruff format --check || status=1
+  (cd src/inspect_tool_support/src && ruff check && ruff format --check) || status=1
+  mypy --exclude tests/test_package src tests || status=1
+  exit $status
