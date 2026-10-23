@@ -1,0 +1,29 @@
+# inspect_flow against inspect_ai main and the newest releases of everything
+# else: tests (slow included), ruff, pyright and the generated-types check.
+# Replaces inspect_flow's inspect_ai_main.yaml.
+name: inspect_flow-py311
+repo: meridianlabs-ai/inspect_flow
+ref: main
+cadence: 2h
+python: "3.11"
+timeout-minutes: 45
+install: |
+  uv sync --dev --upgrade --exclude-newer false
+  uv pip install --exclude-newer false git+https://github.com/UKGovernmentBEIS/inspect_ai.git
+test: |
+  status=0
+  # Types generated from inspect_ai main must match the checked-in ones. Runs
+  # first, before the tests can leave files behind; the upgrade above rewrites
+  # uv.lock, so that stays out of the comparison.
+  uv run --no-sync python src/inspect_flow/_types/type_gen.py || status=1
+  if [ -n "$(git status --porcelain -- . ':!uv.lock')" ]; then
+    echo "Generated types are out of date against inspect_ai main:"
+    git status --short -- . ':!uv.lock'
+    git diff -- . ':!uv.lock'
+    status=1
+  fi
+  uv run --no-sync pytest --runslow || status=1
+  uv run --no-sync ruff check . || status=1
+  uv run --no-sync ruff format --check . || status=1
+  uv run --no-sync pyright || status=1
+  exit $status
