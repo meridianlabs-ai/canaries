@@ -29,17 +29,18 @@ A red canary means something upstream changed, not that our code did. Each run l
 Add a file to `canaries/`, named after the canary:
 
 ```yaml
-- name: inspect_ai            # unique; shown in job names and alerts
-  repo: UKGovernmentBEIS/inspect_ai
-  ref: main
-  cadence: 2h                 # 2h or nightly
-  python: "3.11"
-  timeout-minutes: 60
-  install: |                  # newest releases of everything, ignoring any cooldown
-    uv venv
-    uv pip install --exclude-newer false -e ".[dev]"
-  test: |
-    uv run --no-sync pytest -ra -n logical
+# canaries/inspect_ai.yml
+name: inspect_ai            # unique; shown in job names and alerts
+repo: UKGovernmentBEIS/inspect_ai
+ref: main
+cadence: 2h                 # 2h or nightly
+python: "3.11"
+timeout-minutes: 60
+install: |                  # newest releases of everything, ignoring any cooldown
+  uv venv
+  uv pip install --exclude-newer false -e ".[dev]"
+test: |
+  uv run --no-sync pytest -ra -n logical
 ```
 
 A pull request that changes `canaries/` runs the canaries, so the new entry shows its first result on the PR. To run one entry by hand: **Actions → canary → Run workflow**, with `only` set to its name.
