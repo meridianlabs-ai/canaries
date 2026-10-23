@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: Run only this canary (name from canaries.yml)
+        description: Run only this canary (its name in canaries/)
         required: false
       test_slack:
         description: Only send a test message to the alert channel
@@ -15,7 +15,7 @@ on:
         default: false
   pull_request:
     paths:
-      - canaries.yml
+      - canaries/**
       - scripts/**
       - .github/workflows/canary.yml
 
@@ -41,8 +41,8 @@ jobs:
           ONLY: ${{ inputs.only }}
           SCHEDULE: ${{ github.event.schedule }}
         run: |
-          yq -o=json canaries.yml > "$RUNNER_TEMP/canaries.json"
-          echo "matrix=$(python3 scripts/plan.py "$RUNNER_TEMP/canaries.json")" >> "$GITHUB_OUTPUT"
+          for f in canaries/*.yml; do yq -o=json -I=0 '.' "$f"; done > "$RUNNER_TEMP/canaries.jsonl"
+          echo "matrix=$(python3 scripts/plan.py "$RUNNER_TEMP/canaries.jsonl")" >> "$GITHUB_OUTPUT"
 
   # Installs and runs unvetted releases. Holds no secrets, saves and restores
   # no cache, and produces nothing any other job consumes.

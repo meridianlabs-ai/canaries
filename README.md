@@ -18,7 +18,7 @@ Because GitHub keeps caches, secrets and permissions separate per repository, a 
 
 ## How it works
 
-[`canaries.yml`](canaries.yml) lists the canaries. Each entry names the repository and ref to check out, how to install with the newest dependencies, what to run, and how often (every 2 hours or nightly). [`.github/workflows/canary.yml`](.github/workflows/canary.yml) runs the due entries on a schedule and sends an alert when a canary changes state.
+[`canaries/`](canaries) has one file per canary. Each names the repository and ref to check out, how to install with the newest dependencies, what to run, and how often (every 2 hours or nightly). [`.github/workflows/canary.yml`](.github/workflows/canary.yml) runs the due entries on a schedule and sends an alert when a canary changes state.
 
 Tests that need API keys or external services skip themselves here. Those run separately, against each project's lockfile.
 
@@ -26,7 +26,7 @@ A red canary means something upstream changed, not that our code did. Each run l
 
 ## Adding a canary
 
-Add an entry to `canaries.yml`:
+Add a file to `canaries/`, named after the canary:
 
 ```yaml
 - name: inspect_ai            # unique; shown in job names and alerts
@@ -42,4 +42,4 @@ Add an entry to `canaries.yml`:
     uv run --no-sync pytest -ra -n logical
 ```
 
-A pull request that changes `canaries.yml` runs the canaries, so the new entry shows its first result on the PR. To run one entry by hand: **Actions → canary → Run workflow**, with `only` set to its name.
+A pull request that changes `canaries/` runs the canaries, so the new entry shows its first result on the PR. To run one entry by hand: **Actions → canary → Run workflow**, with `only` set to its name.
