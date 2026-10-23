@@ -54,11 +54,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ matrix.repo }}
           ref: ${{ matrix.ref }}
+          path: ${{ matrix.dir }}
           persist-credentials: false
           submodules: recursive
           # Tags so setuptools_scm/hatch-vcs compute the real version; without
@@ -67,7 +71,7 @@ jobs:
           fetch-tags: true
           filter: "blob:none"
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: 0.13.5
           python-version: ${{ matrix.python }}
