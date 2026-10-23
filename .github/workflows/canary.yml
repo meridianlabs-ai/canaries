@@ -79,45 +79,48 @@ jobs:
           node-version: ${{ matrix.node }}
           package-manager-cache: false
 
+      # Before anything is installed, so this line in the log is genuine;
+      # scripts/notify.py reads the first one for the alert.
       - name: Record what we tested
-        run: git rev-parse HEAD
+        run: |
+          echo "canary-tested: ${{ matrix.repo }}@$(git rev-parse HEAD)"
 
       - name: Install the newest releases
         run: ${{ matrix.install }}
 
+      # One `canary-installed: <name> <version>` line per package, which
+      # scripts/notify.py compares with the canary's last passing run.
       - name: Installed versions
         if: ${{ !cancelled() }}
-        run: uv pip list
+        run: |
+          uv pip list --format freeze | sed -e 's/==/ /' -e 's/^/canary-installed: /'
 
       - name: Test
         run: ${{ matrix.test }}
 
-  # The only job with a secret. It checks out nothing and runs no third-party
-  # code; it reads only the canary job results.
+  # The only job with secrets. It checks out this repository (no
+  # credentials persisted) to run scripts/notify.py, which uses only the
+  # Python standard library. It reads job results and logs through the API
+  # and treats log text as untrusted: escaped, truncated and posted only in
+  # code blocks under a label. Alerts only when a canary changes state.
   notify:
     needs: [plan, canary]
-    if: ${{ always() && (inputs.test_slack || (failure() && github.event_name == 'schedule')) }}
+    if: ${{ always() && (inputs.test_slack || github.event_name == 'schedule') }}
     runs-on: ubuntu-latest
     environment: slack
     permissions:
       actions: read
       contents: read
     steps:
-      - name: Post failed canaries to Slack
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Post state changes to Slack
         env:
-          WEBHOOK: ${{ secrets.CANARY_SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.CANARY_SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ vars.CANARY_SLACK_CHANNEL_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.CANARY_SLACK_WEBHOOK_URL }}
+          TEST_SLACK: ${{ inputs.test_slack }}
           GH_TOKEN: ${{ github.token }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          if [ -z "$WEBHOOK" ]; then
-            echo "CANARY_SLACK_WEBHOOK_URL is not set; skipping." && exit 0
-          fi
-          if [ "${{ inputs.test_slack }}" = "true" ]; then
-            jq -n --arg text "Canaries test message: alerts are wired up. $RUN_URL" '{text: $text}' \
-              | curl -fsS -X POST -H 'Content-Type: application/json' --data @- "$WEBHOOK"
-            exit 0
-          fi
-          failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
-            --jq '[.jobs[] | select(.conclusion == "failure") | .name] | join(", ")')
-          text="Canary failed: ${failed:-see run}. Newest upstream releases broke something. $RUN_URL"
-          jq -n --arg text "$text" '{text: $text}' | curl -fsS -X POST -H 'Content-Type: application/json' --data @- "$WEBHOOK"
+        run: python3 scripts/notify.py
