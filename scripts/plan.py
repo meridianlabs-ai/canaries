@@ -18,6 +18,11 @@ if len(names) != len(set(names)):
 if {"plan", "notify"} & set(names):
     sys.exit("plan and notify are the workflow's own job names; a canary can't use them")
 
+# Check each repository out under its own name, as its own CI does: some test
+# suites expect the checkout directory to be named after the project.
+for e in entries:
+    e["dir"] = e["repo"].split("/")[-1]
+
 only = os.environ.get("ONLY", "").strip()
 schedule = os.environ.get("SCHEDULE", "")
 # On a pull request, the paths it changes (one per line). Canary files are

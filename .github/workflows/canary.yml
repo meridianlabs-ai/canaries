@@ -69,11 +69,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ matrix.repo }}
           ref: ${{ matrix.ref }}
+          path: ${{ matrix.dir }}
           persist-credentials: false
           submodules: recursive
           # Tags so setuptools_scm/hatch-vcs compute the real version; without
