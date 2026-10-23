@@ -9,6 +9,10 @@ on:
       only:
         description: Run only this canary (name from canaries.yml)
         required: false
+      test_slack:
+        description: Only send a test message to the alert channel
+        type: boolean
+        default: false
   pull_request:
     paths:
       - canaries.yml
@@ -24,6 +28,7 @@ concurrency:
 
 jobs:
   plan:
+    if: ${{ !inputs.test_slack }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -85,7 +90,7 @@ jobs:
   # code; it reads only the canary job results.
   notify:
     needs: [plan, canary]
-    if: ${{ failure() && github.event_name == 'schedule' }}
+    if: ${{ always() && (inputs.test_slack || (failure() && github.event_name == 'schedule')) }}
     runs-on: ubuntu-latest
     environment: slack
     permissions:
@@ -100,6 +105,11 @@ jobs:
         run: |
           if [ -z "$WEBHOOK" ]; then
             echo "CANARY_SLACK_WEBHOOK_URL is not set; skipping." && exit 0
+          fi
+          if [ "${{ inputs.test_slack }}" = "true" ]; then
+            jq -n --arg text "Canaries test message: alerts are wired up. $RUN_URL" '{text: $text}' \
+              | curl -fsS -X POST -H 'Content-Type: application/json' --data @- "$WEBHOOK"
+            exit 0
           fi
           failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
             --jq '[.jobs[] | select(.conclusion == "failure") | .name] | join(", ")')
