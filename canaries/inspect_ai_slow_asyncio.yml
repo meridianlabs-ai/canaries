@@ -1,0 +1,20 @@
+# inspect_ai's slow suite (asyncio) on the newest releases of everything:
+# the slow-tests job of meridianlabs-ai/actions' inspect-ai-scheduled-tests.yml
+# without --runapi or keys (tests that need a provider key skip themselves).
+name: inspect_ai_slow_asyncio
+repo: UKGovernmentBEIS/inspect_ai
+ref: main
+cadence: 2h
+python: "3.11"
+timeout-minutes: 180
+install: |
+  uv venv
+  uv pip install --exclude-newer false -e ".[dev]" pytest-timeout
+  # Pre-installed so ensure_test_package_installed() doesn't install it mid-run.
+  uv pip install --exclude-newer false --no-deps ./tests/test_package
+test: |
+  export DOCKER_BUILDKIT=1 BUILDKIT_PROGRESS=plain
+  # Compose 2.38 bake shares image IDs across projects; drop at Compose >= 2.39.
+  export COMPOSE_BAKE=false
+  trap 'docker system prune -f; docker volume prune -f' EXIT
+  uv run --no-sync pytest -ra --runslow --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n logical --timeout=900 --timeout-method=thread
