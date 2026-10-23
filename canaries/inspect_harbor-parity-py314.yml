@@ -1,0 +1,21 @@
+# inspect_harbor's Harbor adapter against the newest harbor release: loads one
+# task from every hub dataset, then compares every field inspect_harbor reads
+# with what harbor's own loader produces. Uses the network (the Harbor hub).
+# Replaces inspect_harbor's harbor-parity.yml.
+name: inspect_harbor-parity-py314
+repo: meridianlabs-ai/inspect_harbor
+ref: main
+cadence: nightly
+python: "3.14"
+timeout-minutes: 30
+install: |
+  uv venv
+  uv pip install --exclude-newer false harbor pytest pytest-asyncio pyyaml -e .
+test: |
+  export INSPECT_HARBOR_NO_TELEMETRY=1
+  export INSPECT_HARBOR_CACHE_DIR="$PWD/.parity-cache"
+  uv run --no-sync python scripts/parity_warm_cache.py
+  # The test imports harbor internals with importorskip. If a release moves one,
+  # the module skips and pytest exits 5 (no tests collected), which fails here;
+  # -rs names what went missing.
+  uv run --no-sync pytest tests/manual/test_harbor_parity.py -q -rs -p no:cacheprovider
