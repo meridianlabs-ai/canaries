@@ -49,4 +49,4 @@ test: |
 
 Optional fields: `runs-on` (a runner label; default `ubuntu-latest`) and `node` (a Node.js version to set up before installing). Set environment variables inside `install` or `test` with `export`.
 
-A pull request that changes `canaries/` runs the canaries, so the new entry shows its first result on the PR. To run one entry by hand: **Actions → canary → Run workflow**, with `only` set to its name.
+A pull request runs only the canaries it changes, so a new entry shows its first result on the PR. A change to the workflow or the planner runs every canary; notifier changes run its unit tests instead. To run one entry by hand: **Actions → canary → Run workflow**, with `only` set to its name.

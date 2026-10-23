@@ -20,6 +20,11 @@ if {"plan", "notify"} & set(names):
 
 only = os.environ.get("ONLY", "").strip()
 schedule = os.environ.get("SCHEDULE", "")
+# On a pull request, the paths it changes (one per line). Canary files are
+# named after their canary; a change to the workflow or this planner affects
+# every canary, while notifier changes are covered by the unit tests.
+changed = os.environ.get("CHANGED_FILES")
+EVERY_CANARY = {".github/workflows/canary.yml", "scripts/plan.py"}
 if only:
     due = [e for e in entries if e["name"] == only]
     if not due:
@@ -27,7 +32,11 @@ if only:
 elif schedule:
     cadences = CADENCE_BY_CRON[schedule]
     due = [e for e in entries if e["cadence"] in cadences]
+elif changed is not None:
+    paths = set(changed.split())
+    due = entries if paths & EVERY_CANARY else [e for e in entries if f"canaries/{e['name']}.yml" in paths]
 else:
     due = entries
 
 print(json.dumps({"include": due}))
+print(len(due), file=sys.stderr)
