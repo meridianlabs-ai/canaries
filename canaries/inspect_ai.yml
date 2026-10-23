@@ -1,28 +1,36 @@
 # inspect_ai on the newest releases of everything, as one canary so a break
-# alerts once: the slow suite under asyncio, then its trio variants (the
-# slow-tests job of meridianlabs-ai/actions' inspect-ai-scheduled-tests.yml,
-# without --runapi or keys; tests that need a provider key skip themselves),
-# then mypy, which catches a new release changing types the tests don't touch.
+# alerts once. In order, all run even if one fails:
+#  - the slow suite under asyncio, then its trio variants (the slow-tests job
+#    of meridianlabs-ai/actions' inspect-ai-scheduled-tests.yml, without
+#    --runapi or keys; tests that need a provider key skip themselves);
+#  - mypy, which catches a new release changing types the tests don't touch;
+#  - the sandbox tools package's own tests (its own dependencies, own venv);
+#  - the docs site render (doc toolchain, own venv; no code execution).
 name: inspect_ai
 repo: UKGovernmentBEIS/inspect_ai
 ref: main
 cadence: 2h
 python: "3.11"
-timeout-minutes: 60
+timeout-minutes: 75
 install: |
   uv venv
   uv pip install --exclude-newer false -e ".[dev]" pytest-timeout
   # Pre-installed so ensure_test_package_installed() doesn't install it mid-run.
   uv pip install --exclude-newer false --no-deps ./tests/test_package
+  uv venv .venv-sandbox-tools
+  uv pip install --python .venv-sandbox-tools --exclude-newer false "./src/inspect_sandbox_tools[dev]"
+  uv venv .venv-docs
+  uv pip install --python .venv-docs --exclude-newer false -r requirements-doc.txt .
 test: |
   export DOCKER_BUILDKIT=1 BUILDKIT_PROGRESS=plain
   # Compose 2.38 bake shares image IDs across projects; drop at Compose >= 2.39.
   export COMPOSE_BAKE=false
   trap 'docker system prune -f; docker volume prune -f' EXIT
   pytest_args=(-ra --runslow --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n logical --timeout-method=thread)
-  # Every check runs; the step fails if any did.
   status=0
   echo "::group::asyncio"; uv run --no-sync pytest "${pytest_args[@]}" --timeout=900 || status=1; echo "::endgroup::"
   echo "::group::trio"; uv run --no-sync pytest "${pytest_args[@]}" --runtrio --timeout=1500 || status=1; echo "::endgroup::"
   echo "::group::mypy"; uv run --no-sync mypy --exclude tests/test_package src tests || status=1; echo "::endgroup::"
+  echo "::group::sandbox tools"; .venv-sandbox-tools/bin/python -m pytest src/inspect_sandbox_tools/tests/ -ra || status=1; echo "::endgroup::"
+  echo "::group::docs"; (export PATH="$PWD/.venv-docs/bin:$PATH" QUARTO_PYTHON="$PWD/.venv-docs/bin/python"; quarto render docs) || status=1; echo "::endgroup::"
   exit $status
