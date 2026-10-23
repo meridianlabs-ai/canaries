@@ -1,0 +1,21 @@
+# inspect_flow main against the newest releases of everything, inspect_ai
+# included, on the newest Python in its CI, as one canary so a break alerts
+# once: tests (slow included), ruff and pyright.
+name: inspect_flow
+repo: meridianlabs-ai/inspect_flow
+ref: main
+cadence: 2h
+python: "3.14"
+timeout-minutes: 45
+install: |
+  uv sync --dev --upgrade --exclude-newer false
+test: |
+  # setup-uv exports UV_PYTHON for the install; unset it so the tests that build
+  # venvs for other Python versions get the version they ask for.
+  unset UV_PYTHON
+  # Every check runs; the step fails if any did.
+  status=0
+  echo "::group::pytest"; uv run --no-sync pytest --runslow || status=1; echo "::endgroup::"
+  echo "::group::ruff"; uv run --no-sync ruff check . || status=1; uv run --no-sync ruff format --check . || status=1; echo "::endgroup::"
+  echo "::group::pyright"; uv run --no-sync pyright || status=1; echo "::endgroup::"
+  exit $status
