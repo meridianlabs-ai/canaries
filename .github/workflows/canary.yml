@@ -32,22 +32,34 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # A pull request checks out its merge commit; the first parent is
+          # the base, so the diff is what the PR changes.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
       - id: plan
         env:
           ONLY: ${{ inputs.only }}
           SCHEDULE: ${{ github.event.schedule }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
         run: |
+          if [ "$IS_PR" = "true" ]; then
+            CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD)
+            export CHANGED_FILES
+          fi
           for f in canaries/*.yml; do yq -o=json -I=0 '.' "$f"; done > "$RUNNER_TEMP/canaries.jsonl"
-          echo "matrix=$(python3 scripts/plan.py "$RUNNER_TEMP/canaries.jsonl")" >> "$GITHUB_OUTPUT"
+          matrix=$(python3 scripts/plan.py "$RUNNER_TEMP/canaries.jsonl" 2> "$RUNNER_TEMP/count")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$(cat "$RUNNER_TEMP/count")" >> "$GITHUB_OUTPUT"
 
   # Installs and runs unvetted releases. Holds no secrets, saves and restores
   # no cache, and produces nothing any other job consumes.
   canary:
     needs: plan
+    if: ${{ needs.plan.outputs.count != '0' }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runs-on || 'ubuntu-latest' }}
     timeout-minutes: ${{ matrix.timeout-minutes }}
