@@ -23,11 +23,6 @@ if {"plan", "notify"} & set(names):
 for e in entries:
     e["dir"] = e["repo"].split("/")[-1]
 
-# Check each repository out under its own name, as its own CI does: some test
-# suites expect the checkout directory to be named after the project.
-for e in entries:
-    e["dir"] = e["repo"].split("/")[-1]
-
 only = os.environ.get("ONLY", "").strip()
 schedule = os.environ.get("SCHEDULE", "")
 # On a pull request, the paths it changes (one per line). Canary files are
