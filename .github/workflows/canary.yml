@@ -13,6 +13,9 @@ on:
         description: Only send a test message to the alert channel
         type: boolean
         default: false
+      repost_run:
+        description: Only re-post the alerts (with details) for the red canaries of this earlier run ID
+        required: false
   pull_request:
     paths:
       - canaries/**
@@ -28,37 +31,53 @@ concurrency:
 
 jobs:
   plan:
-    if: ${{ !inputs.test_slack }}
+    if: ${{ !inputs.test_slack && !inputs.repost_run }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # A pull request checks out its merge commit; the first parent is
+          # the base, so the diff is what the PR changes.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
       - id: plan
         env:
           ONLY: ${{ inputs.only }}
           SCHEDULE: ${{ github.event.schedule }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
         run: |
+          if [ "$IS_PR" = "true" ]; then
+            CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD)
+            export CHANGED_FILES
+          fi
           for f in canaries/*.yml; do yq -o=json -I=0 '.' "$f"; done > "$RUNNER_TEMP/canaries.jsonl"
-          echo "matrix=$(python3 scripts/plan.py "$RUNNER_TEMP/canaries.jsonl")" >> "$GITHUB_OUTPUT"
+          matrix=$(python3 scripts/plan.py "$RUNNER_TEMP/canaries.jsonl" 2> "$RUNNER_TEMP/count")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$(cat "$RUNNER_TEMP/count")" >> "$GITHUB_OUTPUT"
 
   # Installs and runs unvetted releases. Holds no secrets, saves and restores
   # no cache, and produces nothing any other job consumes.
   canary:
     needs: plan
+    if: ${{ needs.plan.outputs.count != '0' }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runs-on || 'ubuntu-latest' }}
     timeout-minutes: ${{ matrix.timeout-minutes }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ matrix.repo }}
           ref: ${{ matrix.ref }}
+          path: ${{ matrix.dir }}
           persist-credentials: false
           submodules: recursive
           # Tags so setuptools_scm/hatch-vcs compute the real version; without
@@ -79,45 +98,49 @@ jobs:
           node-version: ${{ matrix.node }}
           package-manager-cache: false
 
+      # Before anything is installed, so this line in the log is genuine;
+      # scripts/notify.py reads the first one for the alert.
       - name: Record what we tested
-        run: git rev-parse HEAD
+        run: |
+          echo "canary-tested: ${{ matrix.repo }}@$(git rev-parse HEAD)"
 
       - name: Install the newest releases
         run: ${{ matrix.install }}
 
+      # One `canary-installed: <name> <version>` line per package, which
+      # scripts/notify.py compares with the canary's last passing run.
       - name: Installed versions
         if: ${{ !cancelled() }}
-        run: uv pip list
+        run: |
+          uv pip list --format freeze | sed -e 's/==/ /' -e 's/^/canary-installed: /'
 
       - name: Test
         run: ${{ matrix.test }}
 
-  # The only job with a secret. It checks out nothing and runs no third-party
-  # code; it reads only the canary job results.
+  # The only job with secrets. It checks out this repository (no
+  # credentials persisted) to run scripts/notify.py, which uses only the
+  # Python standard library. It reads job results and logs through the API
+  # and treats log text as untrusted: escaped, truncated and posted only in
+  # code blocks under a label. Alerts only when a canary changes state.
   notify:
     needs: [plan, canary]
-    if: ${{ always() && (inputs.test_slack || (failure() && github.event_name == 'schedule')) }}
+    if: ${{ always() && (inputs.test_slack || inputs.repost_run || github.event_name == 'schedule') }}
     runs-on: ubuntu-latest
     environment: slack
     permissions:
       actions: read
       contents: read
     steps:
-      - name: Post failed canaries to Slack
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Post state changes to Slack
         env:
-          WEBHOOK: ${{ secrets.CANARY_SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.CANARY_SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ vars.CANARY_SLACK_CHANNEL_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.CANARY_SLACK_WEBHOOK_URL }}
+          TEST_SLACK: ${{ inputs.test_slack }}
+          REPOST_RUN: ${{ inputs.repost_run }}
           GH_TOKEN: ${{ github.token }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          if [ -z "$WEBHOOK" ]; then
-            echo "CANARY_SLACK_WEBHOOK_URL is not set; skipping." && exit 0
-          fi
-          if [ "${{ inputs.test_slack }}" = "true" ]; then
-            jq -n --arg text "Canaries test message: alerts are wired up. $RUN_URL" '{text: $text}' \
-              | curl -fsS -X POST -H 'Content-Type: application/json' --data @- "$WEBHOOK"
-            exit 0
-          fi
-          failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
-            --jq '[.jobs[] | select(.conclusion == "failure") | .name] | join(", ")')
-          text="Canary failed: ${failed:-see run}. Newest upstream releases broke something. $RUN_URL"
-          jq -n --arg text "$text" '{text: $text}' | curl -fsS -X POST -H 'Content-Type: application/json' --data @- "$WEBHOOK"
+        run: python3 scripts/notify.py
