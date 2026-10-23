@@ -82,7 +82,8 @@ jobs:
       # Before anything is installed, so this line in the log is genuine;
       # scripts/notify.py reads the first one for the alert.
       - name: Record what we tested
-        run: echo "canary-tested: ${{ matrix.repo }}@$(git rev-parse HEAD)"
+        run: |
+          echo "canary-tested: ${{ matrix.repo }}@$(git rev-parse HEAD)"
 
       - name: Install the newest releases
         run: ${{ matrix.install }}
