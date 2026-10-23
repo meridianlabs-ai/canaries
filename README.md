@@ -26,7 +26,7 @@ A red canary means something upstream changed, not that our code did. Each run l
 
 ## Alerts
 
-After each scheduled run, [`scripts/notify.py`](scripts/notify.py) compares every canary with its result in the most recent earlier scheduled run that ran it (searching back about a month; a canary with no result in that time counts as new, so its first failure alerts) and posts to Slack only when one turns red or recovers; a canary that stays red stays quiet. If the planning job fails, so that no canaries ran, each such run posts a plain "planning failed" message instead. The message names the canary, the repository and commit tested, and links the run. With the bot token `CANARY_SLACK_BOT_TOKEN` (secret, `slack` environment) and the channel ID `CANARY_SLACK_CHANNEL_ID` (repository variable), a red alert also gets a threaded reply with the failed tests, the end of the job's log (naming the failed step) and the package versions that changed since the canary last passed, escaped and labelled as untrusted. Without both, alerts go to the incoming webhook `CANARY_SLACK_WEBHOOK_URL` as a single message. Manual and pull request runs never alert; **Run workflow** with `test_slack` sends a test message.
+After each scheduled run, [`scripts/notify.py`](scripts/notify.py) compares every canary with its result in the most recent earlier scheduled run that ran it (a canary with variants is red if any part is red, green if every part that ran is green) (searching back about a month; a canary with no result in that time counts as new, so its first failure alerts) and posts to Slack only when one turns red or recovers; a canary that stays red stays quiet. If the planning job fails, so that no canaries ran, each such run posts a plain "planning failed" message instead. The message names the canary, the repository and commit tested, and links the run. With the bot token `CANARY_SLACK_BOT_TOKEN` (secret, `slack` environment) and the channel ID `CANARY_SLACK_CHANNEL_ID` (repository variable), a red alert also gets a threaded reply with, for each failing part, the failed tests, the end of its log (naming the failed step) and the package versions that changed since that part last passed, escaped and labelled as untrusted. Without both, alerts go to the incoming webhook `CANARY_SLACK_WEBHOOK_URL` as a single message. Manual and pull request runs never alert; **Run workflow** with `test_slack` sends a test message.
 
 ## Adding a canary
 
@@ -34,7 +34,7 @@ Add a file to `canaries/`, named after the canary:
 
 ```yaml
 # canaries/inspect_ai.yml
-name: inspect_ai            # unique; shown in job names and alerts
+name: inspect_ai            # unique (letters, digits, . _ -); shown in job names and alerts
 repo: UKGovernmentBEIS/inspect_ai
 ref: main
 cadence: 2h                 # 2h or nightly
@@ -49,4 +49,13 @@ test: |
 
 Optional fields: `runs-on` (a runner label; default `ubuntu-latest`) and `node` (a Node.js version to set up before installing). Set environment variables inside `install` or `test` with `export`.
 
-A pull request runs only the canaries it changes, so a new entry shows its first result on the PR. A change to the workflow or the planner runs every canary; notifier changes run its unit tests instead. To run one entry by hand: **Actions → canary → Run workflow**, with `only` set to its name.
+To split a canary into parts that run in parallel, add `variants`: each has a short `label` and may override `python`, `install`, `test`, `runs-on`, `node` or `timeout-minutes`; the rest comes from the top level. Each part is its own job, named `<canary> (<label>)`, but the canary still alerts once: it is red when any part fails, and the alert names the failing parts.
+
+```yaml
+variants:
+  - label: py311
+  - label: py314
+    python: "3.14"
+```
+
+A pull request runs only the canaries it changes, so a new entry shows its first result on the PR. A change to the workflow or the planner runs every canary; notifier changes run its unit tests instead. To run one canary by hand (all its parts): **Actions → canary → Run workflow**, with `only` set to its name.
