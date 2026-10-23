@@ -1,6 +1,7 @@
-# inspect_scout's tests and mypy against inspect_ai main and the newest
-# releases of everything else (the Python jobs of inspect_scout's nightly), on
-# the newest Python in its CI, as one canary so a break alerts once.
+# inspect_scout's tests and mypy against the newest released versions of
+# everything, inspect_ai included (the Python jobs of inspect_scout's nightly),
+# on the newest Python in its CI, as one canary so a break alerts once. Testing
+# against inspect_ai main stays in scout's own CI.
 name: inspect_scout
 repo: meridianlabs-ai/inspect_scout
 ref: main
@@ -12,7 +13,6 @@ install: |
   # would also check ts-mono's Python fixtures.
   git submodule deinit --all --force
   uv venv
-  uv pip install --exclude-newer false git+https://github.com/UKGovernmentBEIS/inspect_ai.git
   uv pip install --exclude-newer false ".[dev]"
 test: |
   # Every check runs; the step fails if any did.
