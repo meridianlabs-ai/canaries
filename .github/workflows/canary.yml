@@ -1,0 +1,102 @@
+name: canary
+
+on:
+  schedule:
+    - cron: "0 */2 * * *" # 2h canaries
+    - cron: "30 5 * * *" # nightly canaries (and the 2h ones)
+  workflow_dispatch:
+    inputs:
+      only:
+        description: Run only this canary (name from canaries.yml)
+        required: false
+  pull_request:
+    paths:
+      - canaries.yml
+      - scripts/**
+      - .github/workflows/canary.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canary-${{ github.ref }}-${{ github.event.schedule || inputs.only || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: plan
+        env:
+          ONLY: ${{ inputs.only }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          yq -o=json canaries.yml > "$RUNNER_TEMP/canaries.json"
+          echo "matrix=$(python3 scripts/plan.py "$RUNNER_TEMP/canaries.json")" >> "$GITHUB_OUTPUT"
+
+  # Installs and runs unvetted releases. Holds no secrets, saves and restores
+  # no cache, and produces nothing any other job consumes.
+  canary:
+    needs: plan
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+          submodules: recursive
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: 0.13.5
+          python-version: ${{ matrix.python }}
+          enable-cache: false
+
+      - name: Record what we tested
+        run: git rev-parse HEAD
+
+      - name: Install the newest releases
+        run: ${{ matrix.install }}
+
+      - name: Installed versions
+        if: ${{ !cancelled() }}
+        run: uv pip list
+
+      - name: Test
+        run: ${{ matrix.test }}
+
+  # The only job with a secret. It checks out nothing and runs no third-party
+  # code; it reads only the canary job results.
+  notify:
+    needs: [plan, canary]
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    environment: slack
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Post failed canaries to Slack
+        env:
+          WEBHOOK: ${{ secrets.CANARY_SLACK_WEBHOOK_URL }}
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "CANARY_SLACK_WEBHOOK_URL is not set; skipping." && exit 0
+          fi
+          failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            --jq '[.jobs[] | select(.conclusion == "failure") | .name] | join(", ")')
+          text="Canary failed: ${failed:-see run}. Newest upstream releases broke something. $RUN_URL"
+          jq -n --arg text "$text" '{text: $text}' | curl -fsS -X POST -H 'Content-Type: application/json' --data @- "$WEBHOOK"
