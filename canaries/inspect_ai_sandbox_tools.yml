@@ -1,0 +1,13 @@
+# The unit tests of inspect_ai's sandbox tools package on the newest
+# releases: the `sandbox-tools-unit` job of inspect_ai's build.yml. No Docker.
+name: inspect_ai_sandbox_tools
+repo: UKGovernmentBEIS/inspect_ai
+ref: main
+cadence: nightly
+python: "3.11"
+timeout-minutes: 15
+install: |
+  uv venv
+  uv pip install --exclude-newer false "./src/inspect_sandbox_tools[dev]"
+test: |
+  uv run --no-sync pytest src/inspect_sandbox_tools/tests/ -ra

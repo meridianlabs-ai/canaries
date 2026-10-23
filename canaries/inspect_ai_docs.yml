@@ -1,0 +1,15 @@
+# inspect_ai's documentation site rendered with the newest releases of its
+# doc toolchain and dependencies: the `docs` job of inspect_ai's build.yml.
+# The site doesn't execute code (`execute: enabled: false`); the package is
+# installed because the reference pages are generated from it.
+name: inspect_ai_docs
+repo: UKGovernmentBEIS/inspect_ai
+ref: main
+cadence: nightly
+python: "3.11"
+timeout-minutes: 30
+install: |
+  uv venv
+  uv pip install --exclude-newer false -r requirements-doc.txt .
+test: |
+  uv run --no-sync quarto render docs
