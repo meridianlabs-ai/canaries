@@ -16,6 +16,11 @@ names = [e["name"] for e in entries]
 if len(names) != len(set(names)):
     sys.exit("duplicate canary names in canaries/")
 
+# Check each repository out under its own name, as its own CI does: some test
+# suites expect the checkout directory to be named after the project.
+for e in entries:
+    e["dir"] = e["repo"].split("/")[-1]
+
 only = os.environ.get("ONLY", "").strip()
 schedule = os.environ.get("SCHEDULE", "")
 if only:
