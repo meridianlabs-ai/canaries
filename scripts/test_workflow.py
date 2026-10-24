@@ -63,9 +63,13 @@ class CanaryWorkflow(unittest.TestCase):
                 self.assertNotIn("environment", self.jobs[name])
 
     def test_planning_and_canary_jobs_get_no_extra_permissions(self):
-        for name in ("plan", "canary"):
-            with self.subTest(job=name):
-                self.assertIn(self.jobs[name].get("permissions", {"contents": "read"}), ({"contents": "read"}, {}))
+        # The planner may read Actions history (to re-check red nightly
+        # canaries every 2 hours); canary jobs get nothing beyond reading code.
+        self.assertIn(
+            self.jobs["plan"].get("permissions", {"contents": "read"}),
+            ({"contents": "read"}, {}, {"actions": "read", "contents": "read"}),
+        )
+        self.assertIn(self.jobs["canary"].get("permissions", {"contents": "read"}), ({"contents": "read"}, {}))
 
     def test_canary_jobs_neither_restore_nor_save_a_cache(self):
         for step in self.jobs["canary"]["steps"]:
