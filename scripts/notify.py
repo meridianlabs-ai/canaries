@@ -1,16 +1,18 @@
 """Post canary state changes to Slack.
 
-Runs in the workflow's notify job after a scheduled run. Each canary job's
-conclusion is compared with the same canary's conclusion in the most recent
-earlier scheduled run that ran it; a message goes out only when a canary
-turns red or recovers. Standard library only.
+Runs in the workflow's notify job after a scheduled run. A canary with
+variants runs as several jobs named `<canary> (<label>)`, its parts; it is
+red if any part is red and green if every part that ran is green. Each
+canary's state is compared with its state in the most recent earlier
+scheduled run that ran it; a message goes out only when a canary turns red or
+recovers. Standard library only.
 
-With CANARY_SLACK_BOT_TOKEN and CANARY_SLACK_CHANNEL_ID, each message gets a
-threaded reply with the failed tests, the end of the job's log and the
-package versions that changed since the canary last passed. Otherwise the
-message goes to CANARY_SLACK_WEBHOOK_URL on its own. The canary job marks the
-lines this reads (`canary-tested:`, `canary-installed:`), so each log is read
-as a whole, never split into steps.
+With CANARY_SLACK_BOT_TOKEN and CANARY_SLACK_CHANNEL_ID, each red alert gets
+a threaded reply with, for each failing part, the failed tests, the end of
+its log and the package versions that changed since that part last passed.
+Otherwise the message goes to CANARY_SLACK_WEBHOOK_URL on its own. The canary
+job marks the lines this reads (`canary-tested:`, `canary-installed:`), so
+each log is read as a whole, never split into steps.
 
 Job logs come from runs that installed unreviewed packages, so their text is
 treated as untrusted: it is stripped of control characters, truncated,
@@ -41,6 +43,9 @@ LOG_TAIL_BYTES = 24 << 20
 TESTS_CHARS = 1200
 LOG_CHARS = 3000
 VERSIONS_CHARS = 1500
+LABEL_CHARS = 40  # a part's label as shown
+MAX_PARTS = 6  # failing parts shown in detail and named in the alert; the rest are counted
+REPLY_CHARS = 12000  # the whole threaded reply, after escaping; Slack truncates at 40,000
 
 UNTRUSTED = "Untrusted log output from a run that installed unreviewed packages."
 TESTED_MARKER = "canary-tested: "
@@ -52,6 +57,9 @@ CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 TESTED = re.compile(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})$")
 FAILED_TEST = re.compile(r"^(?:FAILED|ERROR) (\S+)")
 INSTALLED = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*) (\S+)$")
+# The job names scripts/plan.py generates: `<canary>` or `<canary> (<label>)`,
+# both parts matching its NAME pattern.
+JOB_NAME = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)(?: \(([A-Za-z0-9][A-Za-z0-9._-]*)\))?")
 
 
 # --- state ------------------------------------------------------------------
@@ -78,15 +86,59 @@ def previous_job(name, history, want=("red", "green")):
     return None
 
 
-def changed(job, previous):
-    """Whether `job` differs in state from `previous` (None: never ran before).
+def canary_and_part(job_name):
+    """(canary, part label) from a job name `<canary> (<label>)`; a canary
+    without variants has one job, named after it, and no label. None for a
+    name the planner can't generate, or one of the workflow's own jobs.
+
+    Job names are trusted repository metadata, not canary output: GitHub sets
+    them from the matrix the plan job builds from this repository's canary
+    files at the run's commit, canary jobs (read-only token) can't rename
+    jobs, and the notify job runs only for scheduled runs of main and
+    explicit dispatches, never for pull requests. The strict pattern only
+    keeps out names nothing here generates.
+    """
+    match = JOB_NAME.fullmatch(job_name)
+    if not match or match.group(1) in NOT_CANARIES:
+        return None
+    return match.groups()
+
+
+def by_canary(jobs):
+    """{canary: its jobs}, in job order; jobs whose names don't parse are left out."""
+    canaries = {}
+    for job in jobs:
+        if parsed := canary_and_part(job["name"]):
+            canaries.setdefault(parsed[0], []).append(job)
+    return canaries
+
+
+def canary_state(jobs):
+    """'red' if any of a canary's jobs is red, 'green' if every one that ran
+    is green, None if none ran."""
+    states = {state(job["conclusion"]) for job in jobs} - {None}
+    return "red" if "red" in states else "green" if states else None
+
+
+def previous_state(canary, history):
+    """The canary's state in the newest run of `history` that ran any part of it.
+
+    `history` is an iterable of job lists, newest run first; None if none ran it.
+    """
+    for jobs in history:
+        if found := canary_state(by_canary(jobs).get(canary, [])):
+            return found
+    return None
+
+
+def changed(now, before):
+    """Whether a canary's state `now` differs from `before` (None: never ran before).
 
     A canary with no earlier result in the searched history is new and
     counts as previously green, so it alerts on its first failure and stays
     quiet while it passes.
     """
-    before = state(previous["conclusion"]) if previous else "green"
-    return state(job["conclusion"]) != before
+    return now != (before or "green")
 
 
 # --- log text ---------------------------------------------------------------
@@ -102,16 +154,22 @@ def slack_escape(text):
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("`", "'")
 
 
-def plain(name):
-    """A job or step name for display: one line, no markup, bounded.
+def cut(text, limit):
+    """Escaped text cut to `limit` characters, not ending in half an escape."""
+    if len(text) <= limit:
+        return text
+    return re.sub(r"&[a-z]*$", "", text[: limit - 1]) + "…"
+
+
+def plain(name, limit=NAME_CHARS):
+    """A job or step name for display: one line, no markup, at most `limit`
+    characters after escaping (plus the backticks).
 
     Shown in an inline code span, where Slack applies no formatting, so the
     underscores in names like inspect_ai stay as they are.
     """
     name = slack_escape(re.sub(r"[\x00-\x1f\x7f]+", " ", name)).replace("*", "").replace("~", "").strip()
-    if len(name) > NAME_CHARS:
-        name = name[: NAME_CHARS - 1] + "…"
-    return f"`{name}`"
+    return f"`{cut(name, limit)}`"
 
 
 def clean(line):
@@ -141,7 +199,9 @@ def fit(lines, max_chars, keep="head"):
 
 
 def code_block(lines, max_chars, keep="head"):
-    return "```\n" + slack_escape(fit(lines, max_chars, keep)) + "\n```"
+    """Lines in a code block, escaped first so max_chars bounds the escaped
+    text; each line is cut to a quarter of that, so a few always fit."""
+    return "```\n" + fit([cut(slack_escape(line), max(max_chars // 4, 20)) for line in lines], max_chars, keep) + "\n```"
 
 
 def output_lines(log):
@@ -222,37 +282,47 @@ def failing_step(job):
 # --- messages ---------------------------------------------------------------
 
 
-def alert_text(name, red, job_url, commit):
-    """The channel message: canary, what it tested, and the run."""
+def part_list(labels):
+    """Up to MAX_PARTS labels, each bounded, and a count of the rest."""
+    shown = ", ".join(plain(label, LABEL_CHARS) for label in labels[:MAX_PARTS])
+    more = len(labels) - MAX_PARTS
+    return f"{shown} and {more} more" if more > 0 else shown
+
+
+def alert_text(name, red, url, commit, failing_parts=()):
+    """The channel message: canary, its failing parts, what it tested, and the run."""
     if red:
-        head = f":rotating_light: Canary {plain(name)} is failing on the newest releases."
+        parts = f" ({part_list(failing_parts)})" if failing_parts else ""
+        head = f":rotating_light: Canary {plain(name)} is failing on the newest releases{parts}."
     else:
         head = f":white_check_mark: Canary {plain(name)} recovered."
     if commit:
         repo, sha = commit
         head += f" Tested <https://github.com/{repo}/commit/{sha}|{repo}@{sha[:10]}>."
-    return f"{head} <{job_url}|Run log>"
+    return f"{head} <{url}|Run log>"
 
 
 def planning_failed_text(job_url):
     return f":warning: Canary planning failed, so no canaries ran. <{job_url}|Run log>"
 
 
-def details_text(job, log, green_job, green_log, green_url):
-    """The threaded reply for a canary that turned red."""
-    parts = [f"_{UNTRUSTED}_"]
+def job_details(job, log, green_job, green_log, green_url, share=1):
+    """Failed tests, the end of the log and the changed versions for one red
+    job, each in 1/share of its budget."""
+    parts = []
     lines = output_lines(log)
 
     tests, more = failed_tests(lines)
     if tests:
         count = f"{len(tests)}+" if more else str(len(tests))
-        parts.append(f"*Failed tests* ({count}):\n" + code_block(tests, TESTS_CHARS))
+        parts.append(f"*Failed tests* ({count}):\n" + code_block(tests, TESTS_CHARS // share))
 
     step = failing_step(job)
     where = f" (failed step {plain(step['name'])})" if step else ""
     # Leave out the version list and pytest's list of skipped tests.
     tail = [line for line in lines if line.strip() and not line.startswith((INSTALLED_MARKER, "SKIPPED ["))]
-    parts.append(f"*Last lines of the job*{where}:\n" + code_block(tail[-LOG_TAIL_LINES:], LOG_CHARS, keep="tail"))
+    tail = tail[-max(LOG_TAIL_LINES // share, 1) :]
+    parts.append(f"*Last lines of the job*{where}:\n" + code_block(tail, LOG_CHARS // share, keep="tail"))
 
     if green_job is None:
         parts.append("*Versions:* no earlier passing run found to compare with.")
@@ -265,8 +335,45 @@ def details_text(job, log, green_job, green_log, green_url):
         else:
             diff = version_diff(old, new)
             label = f"*Versions changed since <{green_url}|the last passing run>* ({len(diff)}):"
-            parts.append(label + "\n" + code_block(diff, VERSIONS_CHARS) if diff else label + " none.")
-    return "\n\n".join(parts)
+            parts.append(label + "\n" + code_block(diff, VERSIONS_CHARS // share) if diff else label + " none.")
+    return parts
+
+
+def within(sections, limit, note):
+    """Sections joined by blank lines; if that's over `limit` characters,
+    whole sections are dropped from the end and `note` added instead."""
+    text = "\n\n".join(sections)
+    while len(text) > limit and len(sections) > 1:
+        sections = sections[:-1]
+        text = "\n\n".join(sections + [note])
+    return text
+
+
+def details_text(failing, ran=1, run_url=""):
+    """The threaded reply for a canary that turned red.
+
+    `failing` holds (job, url, log, green_job, green_log, green_url) for each
+    red job; `ran` counts the canary's jobs with a result. A canary with parts
+    gets a section for each of its first MAX_PARTS failing parts, which share
+    the bounds of one job; the rest are counted, with the run's link. The
+    whole reply stays within REPLY_CHARS.
+    """
+    texts = [f"_{UNTRUSTED}_"]
+    note = f"_Some details left out to keep this short; see <{run_url}|the run>._" if run_url else "_Some details left out to keep this short._"
+    if len(failing) == 1 and canary_and_part(failing[0][0]["name"])[1] is None:
+        job, _, *rest = failing[0]
+        return within(texts + job_details(job, *rest), REPLY_CHARS, note)
+    labels = [canary_and_part(job["name"])[1] or job["name"] for job, *_ in failing]
+    texts.append(f"*Failing parts* ({len(failing)} of {ran}): {part_list(labels)}")
+    shown = failing[:MAX_PARTS]
+    for (job, url, *rest), label in zip(shown, labels):
+        texts.append(f"*Part* {plain(label, LABEL_CHARS)} (<{url}|Run log>)")
+        texts += job_details(job, *rest, share=len(shown))
+    if len(failing) > len(shown):
+        more = len(failing) - len(shown)
+        where = f": see <{run_url}|the run>" if run_url else ""
+        texts.append(f"_{more} more failing part{'s' if more != 1 else ''} not shown{where}._")
+    return within(texts, REPLY_CHARS, note)
 
 
 # --- GitHub and Slack -------------------------------------------------------
@@ -460,34 +567,53 @@ def main():
         print("Planning failed.")
         slack.post(planning_failed_text(job_url(server, repo, plan)))
         return
-    current = [j for j in jobs if j["name"] not in NOT_CANARIES and state(j["conclusion"])]
+    logs = {}
 
-    for job in current:
-        if repost:
-            if state(job["conclusion"]) != "red":
-                continue
-        elif not changed(job, previous_job(job["name"], github.history(run))):
-            print(f"{job['name']}: still {state(job['conclusion'])}")
+    def log(job):
+        if job["id"] not in logs:
+            try:
+                logs[job["id"]] = github.log(job["id"])
+            except Exception as e:  # still alert, without the commit and details
+                logs[job["id"]] = ""
+                print(f"::warning::log for {job['name']}: {e!r}")
+        return logs[job["id"]]
+
+    for name, parts in by_canary(jobs).items():
+        now = canary_state(parts)
+        if now is None:
             continue
-        red = state(job["conclusion"]) == "red"
-        print(f"{job['name']}: now {'red' if red else 'green'}")
-        url = job_url(server, repo, job)
-        try:
-            log = github.log(job["id"])
-        except Exception as e:  # still alert, without the commit and details
-            log = ""
-            print(f"::warning::log for {job['name']}: {e!r}")
-        ts = slack.post(alert_text(job["name"], red, url, tested_commit(log)))
+        if repost:
+            if now != "red":
+                continue
+        elif not changed(now, previous_state(name, github.history(run))):
+            print(f"{name}: still {now}")
+            continue
+        red = now == "red"
+        print(f"{name}: now {now}")
+        ran = [j for j in parts if state(j["conclusion"])]
+        failing = [j for j in ran if state(j["conclusion"]) == "red"]
+        first = (failing or ran)[0]
+        # A canary with parts links the run, which lists them all.
+        canary_run = f"{server}/{repo}/actions/runs/{first['run_id']}"
+        url = job_url(server, repo, first) if len(parts) == 1 else canary_run
+        labels = [label for label in (canary_and_part(j["name"])[1] for j in failing) if label]
+        ts = slack.post(alert_text(name, red, url, tested_commit(log(first)), labels))
         if not (red and ts):
             continue
         try:
-            green = previous_job(job["name"], github.history(run), want=("green",))
-            green_log = github.log(green["id"]) if green else ""
-            green_url = job_url(server, repo, green) if green else ""
-            reply = details_text(job, log, green, green_log, green_url)
+            details = []
+            for i, job in enumerate(failing):
+                if i >= MAX_PARTS:  # only counted in the reply
+                    details.append((job, job_url(server, repo, job), "", None, "", ""))
+                    continue
+                green = previous_job(job["name"], github.history(run), want=("green",))
+                green_log = github.log(green["id"]) if green else ""
+                green_url = job_url(server, repo, green) if green else ""
+                details.append((job, job_url(server, repo, job), log(job), green, green_log, green_url))
+            reply = details_text(details, len(ran), canary_run)
         except Exception as e:  # the alert is out; say why the details aren't
             reply = f"Couldn't collect the failure details: {slack_escape(type(e).__name__)}. See the run log."
-            print(f"::warning::details for {job['name']}: {e!r}")
+            print(f"::warning::details for {name}: {e!r}")
         slack.post(reply, thread_ts=ts)
 
 
