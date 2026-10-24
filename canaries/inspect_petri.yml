@@ -1,0 +1,13 @@
+# inspect_petri's offline test suite on the newest releases of everything (its own
+# uv.lock and any exclude-newer window ignored).
+name: inspect_petri
+repo: meridianlabs-ai/inspect_petri
+ref: main
+cadence: nightly
+python: "3.12"
+timeout-minutes: 30
+install: |
+  uv venv
+  uv pip install --exclude-newer false -e . --group dev
+test: |
+  uv run --no-sync pytest -ra
