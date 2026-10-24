@@ -56,6 +56,11 @@ def canary_log(sha=SHA, versions=(("anyio", "4.11.0"), ("inspect-ai", "0.3.290")
     return "\n".join(lines)
 
 
+def details(job, log, green, green_log, green_url):
+    """The reply for a canary that is one red job."""
+    return notify.details_text([(job, "https://x/job", log, green, green_log, green_url)])
+
+
 CANARY_STEPS = [
     step("Set up job", "success", "00:00", "00:00", 1),
     step("Record what we tested", "success", "00:00", "00:00", 2),
@@ -85,17 +90,60 @@ class State(unittest.TestCase):
         self.assertIsNone(notify.previous_job("new", history))
 
     def test_only_changes_alert(self):
-        red, green = job("c", "failure"), job("c", "success")
-        self.assertTrue(notify.changed(red, green))
-        self.assertTrue(notify.changed(green, red))
-        self.assertFalse(notify.changed(red, red))
-        self.assertFalse(notify.changed(green, green))
-        self.assertTrue(notify.changed(job("c", "timed_out"), green))
-        self.assertFalse(notify.changed(job("c", "timed_out"), red))
+        self.assertTrue(notify.changed("red", "green"))
+        self.assertTrue(notify.changed("green", "red"))
+        self.assertFalse(notify.changed("red", "red"))
+        self.assertFalse(notify.changed("green", "green"))
 
     def test_new_canary_counts_as_previously_green(self):
-        self.assertTrue(notify.changed(job("c", "failure"), None))
-        self.assertFalse(notify.changed(job("c", "success"), None))
+        self.assertTrue(notify.changed("red", None))
+        self.assertFalse(notify.changed("green", None))
+
+
+class Grouping(unittest.TestCase):
+    def test_canary_and_part(self):
+        self.assertEqual(notify.canary_and_part("inspect_ai (asyncio)"), ("inspect_ai", "asyncio"))
+        self.assertEqual(notify.canary_and_part("inspect_ai"), ("inspect_ai", None))
+        self.assertEqual(notify.canary_and_part("inspect_vscode-proxy-routes"), ("inspect_vscode-proxy-routes", None))
+
+    def test_only_names_the_planner_generates_parse(self):
+        """The review's Q1: the parser is as strict as the planner."""
+        for name in ("x ()", "a (b) (c)", "a (b (c))", "a (x)\n", "a\n", "a  (x)", "a(x)", "a (x y)", "a (x", " a", "plan", "notify", "plan (fake)", "notify (x)", "", "${{ matrix.name }}"):
+            self.assertIsNone(notify.canary_and_part(name), name)
+
+    def test_names_that_dont_parse_are_ignored(self):
+        jobs = [job("victim (safe)", "success"), job("victim (b) (c)", "failure"), job("victim ()", "failure"), job("plan (fake)", "failure")]
+        self.assertEqual(list(notify.by_canary(jobs)), ["victim"])
+        self.assertEqual(notify.canary_state(notify.by_canary(jobs)["victim"]), "green")
+
+    def test_jobs_group_by_canary_in_order(self):
+        jobs = [job("plan", "success"), job("a (x)", "success"), job("b", "failure"), job("a (y)", "failure"), job("notify", None)]
+        groups = notify.by_canary(jobs)
+        self.assertEqual(list(groups), ["a", "b"])
+        self.assertEqual([j["name"] for j in groups["a"]], ["a (x)", "a (y)"])
+
+    def test_canary_state_from_its_parts(self):
+        def canary(*conclusions):
+            return notify.canary_state([job(f"a ({i})", c) for i, c in enumerate(conclusions)])
+
+        self.assertEqual(canary("success", "failure", "success"), "red")
+        self.assertEqual(canary("success", "timed_out"), "red")
+        self.assertEqual(canary("failure", "cancelled"), "red")
+        self.assertEqual(canary("success", "success"), "green")
+        self.assertEqual(canary("success", "cancelled", "skipped"), "green")  # parts that didn't run don't count
+        self.assertIsNone(canary("cancelled", "skipped"))
+        self.assertIsNone(canary())
+
+    def test_previous_state_skips_runs_that_did_not_run_the_canary(self):
+        history = [
+            [job("plan", "success"), job("b", "success")],
+            [job("a (x)", "cancelled"), job("a (y)", "skipped")],
+            [job("a (x)", "success"), job("a (y)", "failure")],
+            [job("a (x)", "success"), job("a (y)", "success")],
+        ]
+        self.assertEqual(notify.previous_state("a", history), "red")
+        self.assertEqual(notify.previous_state("b", history), "green")
+        self.assertIsNone(notify.previous_state("new", history))
 
 
 class Escaping(unittest.TestCase):
@@ -149,12 +197,78 @@ class Truncation(unittest.TestCase):
         log = canary_log(test_output=output)
         failing = job("inspect_ai", "failure", steps=CANARY_STEPS + [step("Test", "failure", "00:09", "06:31", 5)])
         green = job("inspect_ai", "success", id=2, steps=CANARY_STEPS + [step("Test", "success", "00:09", "06:31", 5)])
-        text = notify.details_text(failing, log, green, canary_log(), "https://x/run")
+        text = details(failing, log, green, canary_log(), "https://x/run")
         budget = notify.TESTS_CHARS + notify.LOG_CHARS + notify.VERSIONS_CHARS
         self.assertLess(len(text), budget + 1000)
         self.assertIn("*Failed tests* (100+)", text)
         self.assertIn("(0):", text.split("Versions")[1])
         self.assertIn("more lines", text)
+
+
+class Parts(unittest.TestCase):
+    def test_failing_parts_share_the_bounds_of_one_job(self):
+        output = [f"FAILED tests/test_{i}.py::test_{'x' * 50} - boom" for i in range(500)] + ["y" * 2000] * 200
+        versions = tuple((f"package-{i}", "2.0") for i in range(200))
+        green_log = canary_log(versions=tuple((f"package-{i}", "1.0") for i in range(200)))
+        failing = []
+        for i in range(4):
+            j = job(f"inspect_ai (part{i})", "failure", id=i, steps=CANARY_STEPS + [step("Test", "failure", "00:09", "06:31", 5)])
+            green = job(f"inspect_ai (part{i})", "success", id=10 + i)
+            failing.append((j, f"https://x/job/{i}", canary_log(versions=versions, test_output=output), green, green_log, "https://x/green"))
+        text = notify.details_text(failing, ran=5)
+        one_job = notify.details_text(failing[:1])
+        budget = notify.TESTS_CHARS + notify.LOG_CHARS + notify.VERSIONS_CHARS
+        self.assertLess(len(text), budget + 1500)
+        self.assertLess(len(one_job), budget + 1000)
+        self.assertIn("*Failing parts* (4 of 5): `part0`, `part1`, `part2`, `part3`", text)
+        for i in range(4):
+            self.assertIn(f"*Part* `part{i}` (<https://x/job/{i}|Run log>)", text)
+        self.assertEqual(text.count("*Failed tests* (100+)"), 4)
+        self.assertEqual(text.count("*Versions changed since"), 4)
+
+    def test_many_long_labelled_parts_stay_within_one_reply(self):
+        """The review's R1: 128 failing parts with long labels and escaped log text."""
+        noisy = [f"FAILED tests/t.py::test_{i} - <&>" + "&<>" * 90 for i in range(120)] + ["<!channel> & " * 25] * 60
+        failing = []
+        for i in range(128):
+            j = job(f"a (part{i:03}-{'a' * 60})", "failure", id=i, run_id=7, steps=CANARY_STEPS + [step("Test", "failure", "00:09", "06:31", 5)])
+            failing.append((j, f"https://github.com/o/r/actions/runs/7/job/{i}", canary_log(test_output=noisy), None, "", ""))
+        text = notify.details_text(failing, ran=130, run_url="https://github.com/o/r/actions/runs/7")
+        self.assertLessEqual(len(text), notify.REPLY_CHARS)
+        self.assertIn("*Failing parts* (128 of 130): ", text)
+        self.assertIn("and 122 more", text)
+        self.assertEqual(text.count("*Part* "), notify.MAX_PARTS)
+        self.assertIn("_122 more failing parts not shown: see <https://github.com/o/r/actions/runs/7|the run>._", text)
+        self.assertNotIn("part006", text)
+        self.assertNotIn("<!channel>", text)
+        self.assertEqual(text.count("```") % 2, 0)  # every code block closed
+        # Labels are cut to LABEL_CHARS.
+        self.assertIn(f"`part000-{'a' * (notify.LABEL_CHARS - 9)}…`", text)
+        # Each shown part still shows its log tail, cut and escaped.
+        for section in text.split("*Part* ")[1:]:
+            self.assertIn("&lt;!channel&gt; &amp;", section.split("*Last lines of the job*")[1])
+
+    def test_the_final_bound_drops_whole_sections(self):
+        sections = ["head"] + [f"section {i}\n```\n{'x' * 100}\n```" for i in range(10)]
+        text = notify.within(sections, 500, "_cut_")
+        self.assertLessEqual(len(text), 500)
+        self.assertTrue(text.endswith("\n\n_cut_"))
+        self.assertEqual(text.count("```") % 2, 0)
+        self.assertEqual(notify.within(["a", "b"], 100, "_cut_"), "a\n\nb")
+
+    def test_code_blocks_are_bounded_after_escaping(self):
+        block = notify.code_block(["&" * 200] * 50, 1000)
+        self.assertLessEqual(len(block), 1000 + len("```\n\n```") + len("… 50 more lines\n"))
+        self.assertIn("&amp;", block)
+
+    def test_plain_does_not_end_in_half_an_escape(self):
+        self.assertEqual(notify.plain("ab&cd", limit=4), "`ab…`")
+        self.assertEqual(notify.plain("a" * 50, limit=10), f"`{'a' * 9}…`")
+
+    def test_one_job_has_no_part_headings(self):
+        text = notify.details_text([(job("inspect_ai", "failure"), "https://x/job", canary_log(), None, "", "")])
+        self.assertNotIn("Part", text)
+        self.assertIn("*Last lines of the job*", text)
 
 
 class Logs(unittest.TestCase):
@@ -205,7 +319,7 @@ class Logs(unittest.TestCase):
         green_log = canary_log(sha=OLD_SHA, versions=(("anyio", "4.10.0"), ("inspect-ai", "0.3.290")))
         failing = job("inspect_ai", "failure", steps=CANARY_STEPS + [step("Test", "failure", "00:09", "06:31", 5)])
         green = job("inspect_ai", "success", id=2, steps=CANARY_STEPS + [step("Test", "success", "00:09", "06:31", 5)])
-        text = notify.details_text(failing, log, green, green_log, "https://github.com/o/r/actions/runs/9/job/2")
+        text = details(failing, log, green, green_log, "https://github.com/o/r/actions/runs/9/job/2")
         self.assertTrue(text.startswith(f"_{notify.UNTRUSTED}_"))
         self.assertIn("```\ntests/test_a.py::test_two\n```", text)
         self.assertIn("*Last lines of the job* (failed step `Test`):", text)
@@ -221,7 +335,7 @@ class Logs(unittest.TestCase):
     def test_details_without_a_passing_run(self):
         failing = job("c", "failure", steps=[step("Install the newest releases", "failure", "00:00", "00:09", 3)])
         log = canary_log(versions=(), install_output=["error: No solution found", "##[error]Process completed with exit code 1."])
-        text = notify.details_text(failing, log, None, "", "")
+        text = details(failing, log, None, "", "")
         self.assertIn("(failed step `Install the newest releases`)", text)
         self.assertIn("error: No solution found", text)
         self.assertIn("no earlier passing run", text)
@@ -230,12 +344,12 @@ class Logs(unittest.TestCase):
     def test_install_failure_against_a_passing_run(self):
         failing = job("c", "failure", steps=[step("Install the newest releases", "failure", "00:00", "00:09", 3)])
         log = canary_log(versions=(), install_output=["error: No solution found", "##[error]Process completed with exit code 1."])
-        text = notify.details_text(failing, log, job("c", "success", id=2), canary_log(), "https://x/run")
+        text = details(failing, log, job("c", "success", id=2), canary_log(), "https://x/run")
         self.assertIn("this run didn't get as far as installing", text)
 
     def test_details_for_a_timeout(self):
         failing = job("c", "failure", steps=CANARY_STEPS + [step("Test", "cancelled", "00:09", "06:31", 5)])
-        text = notify.details_text(failing, canary_log(test_output=["still running"]), None, "", "")
+        text = details(failing, canary_log(test_output=["still running"]), None, "", "")
         self.assertIn("(failed step `Test`)", text)
         self.assertIn("still running", text)
 
@@ -246,7 +360,7 @@ class NestedGroups(unittest.TestCase):
     def test_nested_run_group_in_the_failing_step(self):
         output = ["start tests", "##[group]Run nested test suite", "FAILED tests/real.py::test_x - boom", "##[endgroup]", "= 1 failed ="]
         failing = job("c", "failure", steps=CANARY_STEPS + [step("Test", "failure", "00:09", "06:31", 5)])
-        text = notify.details_text(failing, canary_log(test_output=output), None, "", "")
+        text = details(failing, canary_log(test_output=output), None, "", "")
         self.assertIn("```\ntests/real.py::test_x\n```", text)
         self.assertIn("Run nested test suite", text)
         self.assertIn("Process completed with exit code 1.", text)
@@ -279,7 +393,7 @@ class NestedGroups(unittest.TestCase):
             )
 
         green_steps = [{**s, "conclusion": "success"} for s in steps]
-        text = notify.details_text(
+        text = details(
             job("c", "failure", steps=steps), log("4.11.0", True), job("c", "success", id=2, steps=green_steps), log("4.10.0", False), "https://x/run"
         )
         self.assertIn("anyio 4.10.0 → 4.11.0", text)
@@ -301,7 +415,7 @@ class Names(unittest.TestCase):
         text = notify.alert_text("*bold*\n<!channel>", True, url, None)
         self.assertIn("Canary `bold &lt;!channel&gt;` is failing", text)
         failing = job("c", "failure", steps=CANARY_STEPS + [step("_Test_ *now*", "failure", "00:09", "06:31", 5)])
-        self.assertIn("(failed step `_Test_ now`)", notify.details_text(failing, canary_log(), None, "", ""))
+        self.assertIn("(failed step `_Test_ now`)", details(failing, canary_log(), None, "", ""))
 
 
 class BoundedRead(unittest.TestCase):
@@ -330,6 +444,93 @@ class Planner(unittest.TestCase):
             return subprocess.run([sys.executable, script, f.name], capture_output=True, text=True, env={})
         finally:
             os.unlink(f.name)
+
+    def run_plan(self, entries, **env):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            for entry in entries:
+                f.write(json.dumps(entry) + "\n")
+        try:
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plan.py")
+            return subprocess.run([sys.executable, script, f.name], capture_output=True, text=True, env=env)
+        finally:
+            os.unlink(f.name)
+
+    def matrix(self, entries, **env):
+        result = self.run_plan(entries, **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        include = json.loads(result.stdout)["include"]
+        self.assertEqual(result.stderr.strip(), str(len(include)))
+        return include
+
+    VARIANTS = {
+        "name": "inspect_ai",
+        "repo": "UKGovernmentBEIS/inspect_ai",
+        "cadence": "2h",
+        "python": "3.11",
+        "timeout-minutes": 60,
+        "install": "uv venv",
+        "test": "pytest",
+        "variants": [
+            {"label": "asyncio"},
+            {"label": "docs", "install": "uv venv .venv-docs", "test": "quarto render docs", "timeout-minutes": 20, "node": "22"},
+        ],
+    }
+
+    def test_variants_expand_into_parallel_jobs(self):
+        plain_entry = {"name": "inspect_swe", "repo": "meridianlabs-ai/inspect_swe", "cadence": "2h", "test": "pytest"}
+        include = self.matrix([self.VARIANTS, plain_entry])
+        self.assertEqual([e["name"] for e in include], ["inspect_ai (asyncio)", "inspect_ai (docs)", "inspect_swe"])
+        self.assertEqual([e["canary"] for e in include], ["inspect_ai", "inspect_ai", "inspect_swe"])
+        asyncio, docs, swe = include
+        self.assertNotIn("variants", asyncio)
+        self.assertEqual((asyncio["install"], asyncio["test"], asyncio["timeout-minutes"]), ("uv venv", "pytest", 60))
+        self.assertNotIn("node", asyncio)
+        self.assertEqual((docs["install"], docs["test"], docs["timeout-minutes"], docs["node"]), ("uv venv .venv-docs", "quarto render docs", 20, "22"))
+        self.assertEqual((docs["python"], docs["repo"], docs["dir"]), ("3.11", "UKGovernmentBEIS/inspect_ai", "inspect_ai"))
+        self.assertEqual(swe["name"], "inspect_swe")
+
+    def test_only_and_pull_requests_run_every_variant(self):
+        other = {"name": "inspect_swe", "repo": "meridianlabs-ai/inspect_swe", "cadence": "nightly"}
+        names = lambda include: [e["name"] for e in include]
+        self.assertEqual(names(self.matrix([self.VARIANTS, other], ONLY="inspect_ai")), ["inspect_ai (asyncio)", "inspect_ai (docs)"])
+        self.assertEqual(names(self.matrix([self.VARIANTS, other], CHANGED_FILES="canaries/inspect_ai.yml")), ["inspect_ai (asyncio)", "inspect_ai (docs)"])
+        self.assertEqual(names(self.matrix([self.VARIANTS, other], SCHEDULE="0 */2 * * *")), ["inspect_ai (asyncio)", "inspect_ai (docs)"])
+
+    def test_variant_validation(self):
+        def rejected(variants, name="inspect_ai"):
+            result = self.run_plan([{**self.VARIANTS, "name": name, "variants": variants}])
+            self.assertNotEqual(result.returncode, 0)
+            return result.stderr
+
+        self.assertIn("duplicate job names inspect_ai (a)", rejected([{"label": "a"}, {"label": "a"}]))
+        for label in (None, "two words", "a(b)", "a\n", "", "-a"):
+            variant = {"label": label} if label is not None else {"test": "pytest"}
+            self.assertIn("must be a string of letters", rejected([variant]))
+        self.assertIn("can only set", rejected([{"label": "a", "repo": "evil/repo"}]))
+        self.assertIn("non-empty list", rejected([]))
+        self.assertIn("non-empty list", rejected({"label": "a"}))
+        self.assertIn("must be a string of letters", rejected(["a"]))
+        self.assertIn("must be a string of letters", rejected([{"label": "a"}], name="inspect ai (x)"))
+
+    def test_names_and_labels_must_be_strings(self):
+        """The review's R2: `label: 1` and `label: "1"` both rendered as `a (1)`."""
+        for label in (1, True, 1.5):
+            result = self.run_plan([{**self.VARIANTS, "variants": [{"label": label}, {"label": str(label)}]}])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(f"variant label {label!r} must be a string", result.stderr)
+        for name in (1, True, None):
+            result = self.run_plan([{"name": name, "repo": "o/r", "cadence": "2h"}])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(f"canary name {name!r} must be a string", result.stderr)
+        self.assertEqual([e["name"] for e in self.matrix([{**self.VARIANTS, "variants": [{"label": "1"}, {"label": "2"}]}])], ["inspect_ai (1)", "inspect_ai (2)"])
+
+    def test_every_generated_job_name_parses_back(self):
+        include = self.matrix([self.VARIANTS, {"name": "a.b-c_1", "repo": "o/r", "cadence": "2h"}])
+        for entry in include:
+            self.assertEqual(notify.canary_and_part(entry["name"]), (entry["canary"], entry.get("label")))
+        # The same label in two canaries is fine.
+        other = {**self.VARIANTS, "name": "other", "repo": "o/other"}
+        self.assertEqual(len(self.matrix([self.VARIANTS, other])), 4)
 
     def test_workflow_job_names_are_reserved(self):
         self.assertEqual(self.plan(["inspect_ai"]).returncode, 0)
@@ -536,6 +737,98 @@ class Main(unittest.TestCase):
         # A result beyond the limit isn't searched for: that canary counts as new too.
         self.assertEqual(len(self.run_main(self.history(total, total, "failure"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"})), 1)
         self.assertEqual(self.run_main(self.history(total, total, "success"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}), [])
+
+    BOT = {"SLACK_BOT_TOKEN": "xoxb", "SLACK_CHANNEL_ID": "C1"}
+    WEBHOOK = {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}
+
+    def test_parts_alert_once_with_a_section_per_failing_part(self):
+        failing_steps = CANARY_STEPS + [step("Test", "failure", "00:09", "06:31", 5)]
+        runs = {
+            100: [
+                job("plan", "success", id=1, run_id=100),
+                job("a (x)", "success", id=11, run_id=100),
+                job("a (y)", "failure", id=12, run_id=100, steps=failing_steps),
+                job("a (z)", "timed_out", id=13, run_id=100, steps=failing_steps),
+                job("b", "success", id=14, run_id=100),
+            ],
+            99: [job("a (x)", "success", id=21, run_id=99), job("a (y)", "success", id=22, run_id=99), job("a (z)", "cancelled", id=23, run_id=99), job("b", "success", id=24, run_id=99)],
+            98: [job("a (x)", "success", id=31, run_id=98), job("a (y)", "success", id=32, run_id=98), job("a (z)", "success", id=33, run_id=98)],
+        }
+        logs = {
+            12: canary_log(versions=(("anyio", "4.11.0"),), test_output=["FAILED tests/y.py::test_y - boom"]),
+            13: canary_log(versions=(("trio", "0.31.0"),), test_output=["still running"]),
+            22: canary_log(sha=OLD_SHA, versions=(("anyio", "4.10.0"),)),
+            33: canary_log(sha=OLD_SHA, versions=(("trio", "0.30.0"),)),
+        }
+        posts = self.run_main(runs, self.BOT, logs)
+        self.assertEqual(len(posts), 2)
+        (_, alert), (_, reply) = posts
+        self.assertIn("Canary `a` is failing on the newest releases (`y`, `z`).", alert["text"])
+        self.assertIn(f"UKGovernmentBEIS/inspect_ai@{SHA[:10]}", alert["text"])
+        self.assertIn("<https://github.com/o/r/actions/runs/100|Run log>", alert["text"])  # the run, listing every part
+        self.assertEqual(reply["thread_ts"], "1.0")
+        text = reply["text"]
+        self.assertTrue(text.startswith(f"_{notify.UNTRUSTED}_"))
+        self.assertIn("*Failing parts* (2 of 3): `y`, `z`", text)
+        y, z = text.split("*Part* `y`")[1].split("*Part* `z`")
+        self.assertIn("(<https://github.com/o/r/actions/runs/100/job/12|Run log>)", y)
+        self.assertIn("tests/y.py::test_y", y)
+        self.assertIn("anyio 4.10.0 → 4.11.0", y)
+        self.assertIn("actions/runs/99/job/22", y)  # y's last green
+        self.assertIn("still running", z)
+        self.assertIn("trio 0.30.0 → 0.31.0", z)
+        self.assertIn("actions/runs/98/job/33", z)  # z didn't run in 99
+        self.assertNotIn("anyio", z)
+
+    def test_parts_through_the_webhook(self):
+        runs = {100: [job("a (x)", "success", run_id=100), job("a (y)", "failure", id=2, run_id=100)], 99: [job("a (x)", "success", run_id=99)]}
+        posts = self.run_main(runs, self.WEBHOOK)
+        self.assertEqual(len(posts), 1)
+        self.assertIn("Canary `a` is failing on the newest releases (`y`).", posts[0][1]["text"])
+
+    def test_the_alert_names_at_most_max_parts(self):
+        runs = {100: [job(f"a (p{i}-{'x' * 60})", "failure", id=i, run_id=100) for i in range(20)], 99: [job("a (p0)", "success", run_id=99)]}
+        posts = self.run_main(runs, self.BOT)
+        self.assertEqual(len(posts), 2)
+        alert, reply = posts[0][1]["text"], posts[1][1]["text"]
+        self.assertIn("and 14 more).", alert)
+        self.assertEqual(alert.count("`p"), notify.MAX_PARTS)
+        self.assertLess(len(alert), 1000)
+        self.assertIn("14 more failing parts not shown: see <https://github.com/o/r/actions/runs/100|the run>", reply)
+
+    def test_a_canary_staying_red_is_quiet_whichever_part_fails(self):
+        runs = {100: [job("a (x)", "success", run_id=100), job("a (y)", "failure", run_id=100)], 99: [job("a (x)", "failure", run_id=99), job("a (y)", "success", run_id=99)]}
+        self.assertEqual(self.run_main(runs, self.WEBHOOK), [])
+        runs = {100: [job("a (x)", "success", run_id=100), job("a (y)", "cancelled", run_id=100)], 99: [job("a (x)", "success", run_id=99), job("a (y)", "success", run_id=99)]}
+        self.assertEqual(self.run_main(runs, self.WEBHOOK), [])
+
+    def test_a_part_added_between_runs(self):
+        before = [job("plan", "success", run_id=99), job("a (x)", "success", id=21, run_id=99)]
+        self.assertEqual(self.run_main({100: [job("a (x)", "success", run_id=100), job("a (new)", "success", run_id=100)], 99: before}, self.WEBHOOK), [])
+        runs = {100: [job("a (x)", "success", id=11, run_id=100), job("a (new)", "failure", id=12, run_id=100)], 99: before}
+        posts = self.run_main(runs, self.BOT, {12: canary_log(test_output=["FAILED tests/n.py::test_n"])})
+        self.assertEqual(len(posts), 2)
+        self.assertIn("(`new`)", posts[0][1]["text"])
+        reply = posts[1][1]["text"]
+        self.assertIn("*Failing parts* (1 of 2): `new`", reply)
+        self.assertIn("no earlier passing run found", reply)
+
+    def test_a_part_removed_between_runs(self):
+        before = [job("a (x)", "failure", id=21, run_id=99), job("a (y)", "success", id=22, run_id=99)]
+        posts = self.run_main({100: [job("a (y)", "success", id=11, run_id=100)], 99: before}, self.WEBHOOK)
+        self.assertEqual(len(posts), 1)
+        self.assertIn("Canary `a` recovered", posts[0][1]["text"])
+        self.assertIn("<https://github.com/o/r/actions/runs/100/job/11|Run log>", posts[0][1]["text"])
+        before = [job("a (x)", "failure", run_id=99), job("a (y)", "failure", run_id=99)]
+        self.assertEqual(self.run_main({100: [job("a (y)", "failure", run_id=100)], 99: before}, self.WEBHOOK), [])
+
+    def test_a_canary_split_into_parts_keeps_its_state(self):
+        now = [job("a (x)", "failure", id=11, run_id=100), job("a (y)", "success", id=12, run_id=100)]
+        self.assertEqual(self.run_main({100: now, 99: [job("a", "failure", run_id=99)]}, self.WEBHOOK), [])
+        posts = self.run_main({100: now, 99: [job("a", "success", id=21, run_id=99)]}, self.BOT)
+        self.assertEqual(len(posts), 2)
+        self.assertIn("Canary `a` is failing", posts[0][1]["text"])
+        self.assertIn("no earlier passing run found", posts[1][1]["text"])  # versions compare part to part
 
     def test_test_message_on_both_paths(self):
         posts = self.run_main({}, {"TEST_SLACK": "true", "SLACK_WEBHOOK_URL": "https://hooks.example/x"})
