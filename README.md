@@ -18,7 +18,7 @@ Because GitHub keeps caches, secrets and permissions separate per repository, a 
 
 ## How it works
 
-[`canaries/`](canaries) has one file per canary. Each names the repository and ref to check out, how to install with the newest dependencies, what to run, and how often (every 2 hours or nightly). [`.github/workflows/canary.yml`](.github/workflows/canary.yml) runs the due entries on a schedule and sends an alert when a canary changes state.
+[`canaries/`](canaries) has one file per canary. Each names the repository and ref to check out, how to install with the newest dependencies, what to run, and how often (every 2 hours or nightly). [`.github/workflows/canary.yml`](.github/workflows/canary.yml) runs the due entries on a schedule and sends an alert when a canary changes state. A nightly canary whose latest scheduled result is red also runs every 2 hours, so a fix shows as recovered within about two hours of landing; once green, it goes back to nightly.
 
 Tests that need API keys or external services skip themselves here. Those run separately, against each project's lockfile.
 

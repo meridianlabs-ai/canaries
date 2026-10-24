@@ -439,7 +439,7 @@ class GitHub:
             self._jobs[run_id] = jobs
         return self._jobs[run_id]
 
-    def _fetch_earlier(self, run):
+    def _fetch_earlier(self, run, per_page=HISTORY_PAGE):
         """Adds the next page of scheduled runs created before the oldest seen so far.
 
         Pages go by creation time rather than page number, so runs started
@@ -451,24 +451,24 @@ class GitHub:
         seen = {run["id"]} | {r["id"] for r in self._runs}
         data = self.get(
             f"actions/workflows/{run['workflow_id']}/runs"
-            f"?event=schedule&per_page={HISTORY_PAGE}&created=%3C%3D{before}"
+            f"?event=schedule&per_page={per_page}&created=%3C%3D{before}"
         )
         new = [r for r in data["workflow_runs"] if r["id"] not in seen]
         self._runs += new
         self._exhausted = not new
 
-    def history(self, run):
+    def history(self, run, limit=HISTORY_LIMIT):
         """Job lists of the scheduled runs created before `run`, newest first.
 
-        Ends when the history does, or after HISTORY_LIMIT runs, which only
-        bounds the API calls.
+        Ends when the history does, or after `limit` runs, which only bounds
+        the API calls.
         """
         i = 0
-        while i < HISTORY_LIMIT:
+        while i < limit:
             if i == len(self._runs):
                 if self._exhausted:
                     return
-                self._fetch_earlier(run)
+                self._fetch_earlier(run, min(HISTORY_PAGE, limit + 1))  # +1: the page can include `run`
                 continue
             yield self.jobs(self._runs[i]["id"])
             i += 1
