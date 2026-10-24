@@ -1,12 +1,58 @@
-# inspect_ai's offline suite on the newest releases of everything.
+# inspect_ai on the newest releases of everything: one canary, so a break
+# alerts once, in four parts that run in parallel, each with only its own
+# install:
+#  - asyncio: the slow suite (the slow-tests job of meridianlabs-ai/actions'
+#    inspect-ai-scheduled-tests.yml, without --runapi or keys; tests that need
+#    a provider key skip themselves), then mypy, which catches a new release
+#    changing types the tests don't touch;
+#  - trio: the slow suite's trio variants;
+#  - sandbox-tools: the sandbox tools package's own tests (the
+#    sandbox-tools-unit job of inspect_ai's build.yml; no Docker);
+#  - docs: the docs site render (the docs job of build.yml; the site doesn't
+#    execute code, and the package is installed for the reference pages).
 name: inspect_ai
 repo: UKGovernmentBEIS/inspect_ai
 ref: main
 cadence: 2h
 python: "3.11"
 timeout-minutes: 60
+# The slow suite's environment, for asyncio and trio.
 install: |
   uv venv
-  uv pip install --exclude-newer false -e ".[dev]"
-test: |
-  uv run --no-sync pytest -ra -n logical --timeout=900 --timeout-method=thread
+  uv pip install --exclude-newer false -e ".[dev]" pytest-timeout
+  # Pre-installed so ensure_test_package_installed() doesn't install it mid-run.
+  uv pip install --exclude-newer false --no-deps ./tests/test_package
+variants:
+  - label: asyncio
+    test: |
+      export DOCKER_BUILDKIT=1 BUILDKIT_PROGRESS=plain
+      # Compose 2.38 bake shares image IDs across projects; drop at Compose >= 2.39.
+      export COMPOSE_BAKE=false
+      trap 'docker system prune -f; docker volume prune -f' EXIT
+      status=0
+      uv run --no-sync pytest -ra --runslow --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" \
+        -n logical --timeout=900 --timeout-method=thread || status=1
+      # mypy runs even if the tests failed.
+      echo "::group::mypy"; uv run --no-sync mypy --exclude tests/test_package src tests || status=1; echo "::endgroup::"
+      exit $status
+  - label: trio
+    test: |
+      export DOCKER_BUILDKIT=1 BUILDKIT_PROGRESS=plain
+      export COMPOSE_BAKE=false
+      trap 'docker system prune -f; docker volume prune -f' EXIT
+      uv run --no-sync pytest -ra --runslow --runtrio --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" \
+        -n logical --timeout=1500 --timeout-method=thread
+  - label: sandbox-tools
+    timeout-minutes: 15
+    install: |
+      uv venv
+      uv pip install --exclude-newer false "./src/inspect_sandbox_tools[dev]"
+    test: |
+      uv run --no-sync pytest src/inspect_sandbox_tools/tests/ -ra
+  - label: docs
+    timeout-minutes: 30
+    install: |
+      uv venv
+      uv pip install --exclude-newer false -r requirements-doc.txt .
+    test: |
+      uv run --no-sync quarto render docs
