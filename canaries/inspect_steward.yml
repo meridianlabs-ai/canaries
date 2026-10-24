@@ -1,0 +1,13 @@
+# inspect_steward's offline test suite on the newest releases of everything (its own
+# uv.lock and any exclude-newer window ignored).
+name: inspect_steward
+repo: meridianlabs-ai/inspect_steward
+ref: main
+cadence: nightly
+python: "3.12"
+timeout-minutes: 30
+install: |
+  uv venv
+  uv pip install --exclude-newer false -e . --group dev
+test: |
+  uv run --no-sync pytest -ra -m "not network"

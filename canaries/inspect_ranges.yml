@@ -1,0 +1,23 @@
+# inspect_ranges's offline test suite on the newest releases of everything (its
+# own uv.lock and any exclude-newer window ignored).
+name: inspect_ranges
+repo: meridianlabs-ai/inspect_ranges
+ref: main
+cadence: nightly
+python: "3.12"
+timeout-minutes: 30
+install: |
+  uv venv
+  uv pip install --exclude-newer false -e . --group dev
+  # qemu-utils and the pinned Go and .NET toolchains for the codec drift guards,
+  # installed by the steps of inspect_ranges's own py-test job so the pins and
+  # checksums stay in step with it.
+  yq -o=json '[.jobs["py-test"].steps[] | select(.name | test("qemu-utils|Go toolchain|NET SDK")) | .run]' \
+    .github/workflows/build.yaml > "$RUNNER_TEMP/toolchains.json"
+  test "$(jq length "$RUNNER_TEMP/toolchains.json")" -eq 3
+  jq -r '.[]' "$RUNNER_TEMP/toolchains.json" > "$RUNNER_TEMP/toolchains.sh"
+  bash -e "$RUNNER_TEMP/toolchains.sh"
+test: |
+  # The drift guards must run, never silently skip, as in inspect_ranges's CI.
+  export INSPECT_RANGES_REQUIRE_GO=1 INSPECT_RANGES_REQUIRE_DOTNET=1
+  uv run --no-sync pytest -ra
