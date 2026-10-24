@@ -8,7 +8,7 @@ Our project repositories install dependencies only from their lockfiles, pinned 
 
 The canaries do the opposite: each run installs the latest of everything, with no lockfile and no waiting period for new releases. Those are exactly the runs where a malicious new release would execute, so they live here, isolated from everything else:
 
-- **No secrets.** Canary jobs have no credentials. The only secret in this repository is the webhook for our alert channel, available only to the job that sends alerts. That job runs no third-party code and reads only the canary results.
+- **No secrets.** Canary jobs have no credentials. The only secrets in this repository are the Slack credentials for our alert channel, available only to the job that sends alerts. That job checks out only this repository, without credentials, and runs [`scripts/notify.py`](scripts/notify.py), which uses only the Python standard library: no third-party code. It reads the canary results and logs, and treats log text as untrusted.
 - **Read-only token.** Every job's `GITHUB_TOKEN` is read-only.
 - **No caches.** Canary jobs neither restore nor save the Actions cache.
 - **Nothing downstream.** No other workflow or repository consumes anything a canary produces.
@@ -23,6 +23,10 @@ Because GitHub keeps caches, secrets and permissions separate per repository, a 
 Tests that need API keys or external services skip themselves here. Those run separately, against each project's lockfile.
 
 A red canary means something upstream changed, not that our code did. Each run logs the exact commit tested and the versions it installed.
+
+## Alerts
+
+After each scheduled run, [`scripts/notify.py`](scripts/notify.py) compares every canary with its result in the most recent earlier scheduled run that ran it (searching back about a month; a canary with no result in that time counts as new, so its first failure alerts) and posts to Slack only when one turns red or recovers; a canary that stays red stays quiet. If the planning job fails, so that no canaries ran, each such run posts a plain "planning failed" message instead. The message names the canary, the repository and commit tested, and links the run. With the bot token `CANARY_SLACK_BOT_TOKEN` (secret, `slack` environment) and the channel ID `CANARY_SLACK_CHANNEL_ID` (repository variable), a red alert also gets a threaded reply with the failed tests, the end of the job's log (naming the failed step) and the package versions that changed since the canary last passed, escaped and labelled as untrusted. Without both, alerts go to the incoming webhook `CANARY_SLACK_WEBHOOK_URL` as a single message. Manual and pull request runs never alert; **Run workflow** with `test_slack` sends a test message.
 
 ## Adding a canary
 
@@ -45,4 +49,4 @@ test: |
 
 Optional fields: `runs-on` (a runner label; default `ubuntu-latest`) and `node` (a Node.js version to set up before installing). Set environment variables inside `install` or `test` with `export`.
 
-A pull request that changes `canaries/` runs the canaries, so the new entry shows its first result on the PR. To run one entry by hand: **Actions → canary → Run workflow**, with `only` set to its name.
+A pull request runs only the canaries it changes, so a new entry shows its first result on the PR. A change to the workflow or the planner runs every canary; notifier changes run its unit tests instead. To run one entry by hand: **Actions → canary → Run workflow**, with `only` set to its name.

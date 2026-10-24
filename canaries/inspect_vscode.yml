@@ -1,0 +1,21 @@
+# The extension's webview proxy rejects any view-server route it doesn't
+# recognize. This dumps the routes the newest inspect-ai and inspect-scout
+# releases serve and checks each one against the proxy's table, so a new
+# upstream endpoint shows up here rather than as a silently broken panel.
+# Replaces inspect_vscode's proxy-routes.yml.
+name: inspect_vscode
+repo: meridianlabs-ai/inspect_vscode
+ref: main
+cadence: nightly
+python: "3.12"
+node: "22"
+timeout-minutes: 20
+install: |
+  corepack enable
+  pnpm install --frozen-lockfile
+  uv venv
+  uv pip install --exclude-newer false inspect-ai inspect-scout
+test: |
+  .venv/bin/python scripts/proxy-routes/dump-openapi.py --out out/proxy-routes
+  pnpm compile-tests
+  node scripts/proxy-routes/check.mjs
