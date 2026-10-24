@@ -1,0 +1,22 @@
+# inspect_scout's tests and mypy against the newest released versions of
+# everything, inspect_ai included (the Python jobs of inspect_scout's nightly),
+# on the newest Python in its CI, as one canary so a break alerts once. Testing
+# against inspect_ai main stays in scout's own CI.
+name: inspect_scout
+repo: meridianlabs-ai/inspect_scout
+ref: main
+cadence: nightly
+python: "3.14"
+timeout-minutes: 30
+install: |
+  # scout's Python jobs check out without the ts-mono submodule; with it, mypy
+  # would also check ts-mono's Python fixtures.
+  git submodule deinit --all --force
+  uv venv
+  uv pip install --exclude-newer false ".[dev]"
+test: |
+  # Every check runs; the step fails if any did.
+  status=0
+  echo "::group::pytest"; uv run --no-sync pytest -ra || status=1; echo "::endgroup::"
+  echo "::group::mypy"; uv run --no-sync mypy src examples tests || status=1; echo "::endgroup::"
+  exit $status
