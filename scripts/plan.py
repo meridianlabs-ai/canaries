@@ -7,6 +7,13 @@ only the standard library.
 A canary with `variants` becomes one matrix entry per variant, each named
 `<canary> (<label>)`, so its parts run in parallel; scripts/notify.py groups
 them back into one canary by that name.
+
+On the 2-hour schedule it also re-runs each nightly canary whose latest
+scheduled result is red, so a fix shows as recovered within about two hours;
+once green it's back to nightly. That reads earlier runs with the job's
+token (GH_TOKEN, `actions: read`), using scripts/notify.py's history and
+grouping, so a canary is red here exactly when the notifier says so.
+Messages go to stderr; its last line is the number of jobs.
 """
 
 import json
@@ -14,7 +21,13 @@ import os
 import re
 import sys
 
+from notify import GitHub, previous_state
+
 CADENCE_BY_CRON = {"0 */2 * * *": {"2h"}, "30 5 * * *": {"2h", "nightly"}}
+RECHECK_CRON = "0 */2 * * *"
+# Earlier scheduled runs searched for a nightly canary's latest result: a
+# day is about 13 (twelve 2-hour runs and the nightly one), so two days.
+RECHECK_RUNS = 30
 
 entries = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 
@@ -68,6 +81,33 @@ if duplicates:
 for e in entries:
     e["dir"] = e["repo"].split("/")[-1]
 
+def still_red(names):
+    """Those of `names` whose latest result in the last RECHECK_RUNS scheduled
+    runs is red (any part red). A canary whose result can't be read, or
+    that has none, counts as not red, with a warning: fewer runs, not more."""
+    env = os.environ
+    try:
+        github = GitHub(env["GITHUB_API_URL"], env["GITHUB_REPOSITORY"], env["GH_TOKEN"])
+        run = github.get(f"actions/runs/{env['GITHUB_RUN_ID']}")
+    except Exception as e:
+        print(f"::warning::Couldn't read this run ({e!r}), so no red nightly canaries are re-checked.", file=sys.stderr)
+        return set()
+    red = set()
+    for name in names:
+        try:
+            latest = previous_state(name, github.history(run, limit=RECHECK_RUNS))
+        except Exception as e:
+            print(f"::warning::Couldn't read {name}'s latest result ({e!r}), so it isn't re-checked.", file=sys.stderr)
+            continue
+        if latest is None:
+            print(f"::warning::No result for {name} in the last {RECHECK_RUNS} scheduled runs, so it isn't re-checked.", file=sys.stderr)
+        elif latest == "red":
+            red.add(name)
+    if red:
+        print(f"Re-checking red nightly canaries: {', '.join(sorted(red))}", file=sys.stderr)
+    return red
+
+
 only = os.environ.get("ONLY", "").strip()
 schedule = os.environ.get("SCHEDULE", "")
 # On a pull request, the paths it changes (one per line). Canary files are
@@ -81,7 +121,8 @@ if only:
         sys.exit(f"no canary named {only!r}")
 elif schedule:
     cadences = CADENCE_BY_CRON[schedule]
-    due = [e for e in entries if e["cadence"] in cadences]
+    recheck = still_red([e["name"] for e in entries if e["cadence"] == "nightly"]) if schedule == RECHECK_CRON else set()
+    due = [e for e in entries if e["cadence"] in cadences or e["name"] in recheck]
 elif changed is not None:
     paths = set(changed.split())
     due = entries if paths & EVERY_CANARY else [e for e in entries if f"canaries/{e['name']}.yml" in paths]

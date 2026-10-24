@@ -1,11 +1,14 @@
 """Tests for notify.py: python3 -m unittest discover -s scripts"""
 
+import contextlib
+import http.server
 import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
@@ -459,7 +462,7 @@ class Planner(unittest.TestCase):
         result = self.run_plan(entries, **env)
         self.assertEqual(result.returncode, 0, result.stderr)
         include = json.loads(result.stdout)["include"]
-        self.assertEqual(result.stderr.strip(), str(len(include)))
+        self.assertEqual(result.stderr.splitlines()[-1], str(len(include)))
         return include
 
     VARIANTS = {
@@ -839,6 +842,183 @@ class Main(unittest.TestCase):
 
     def test_no_credentials_posts_nothing(self):
         self.assertEqual(self.run_main({}, {"TEST_SLACK": "true"}), [])
+
+    def test_a_red_nightly_canary_rechecked_every_2_hours(self):
+        """Nightly red, then 2-hour re-checks red, red, green: one alert, then one recovery."""
+        posts = []
+        for now in range(len(RECHECK_TIMELINE)):
+            posts.append([body["text"] for _, body in self.run_main(timeline_runs(now), self.WEBHOOK)])
+        self.assertEqual([len(p) for p in posts], [0, 0, 1, 0, 0, 1, 0, 0])
+        self.assertIn("Canary `n` is failing", posts[2][0])
+        self.assertIn("Canary `n` recovered", posts[5][0])
+
+
+# Scheduled runs, oldest first: which canaries each ran, and how they ended.
+# `n` is nightly, `fast` every 2 hours; while `n` is red, the 2-hour runs
+# re-check it.
+RECHECK_TIMELINE = [
+    ("nightly", {"fast": "success", "n": "success"}),
+    ("2h", {"fast": "success"}),
+    ("nightly", {"fast": "success", "n": "failure"}),  # breaks
+    ("2h", {"fast": "success", "n": "failure"}),  # re-checked: still red
+    ("2h", {"fast": "success", "n": "failure"}),
+    ("2h", {"fast": "success", "n": "success"}),  # fixed
+    ("2h", {"fast": "success"}),  # back to nightly
+    ("nightly", {"fast": "success", "n": "success"}),
+]
+
+
+def timeline_runs(now, current=None):
+    """FakeServices runs with RECHECK_TIMELINE[now] as the current run (or
+    `current` jobs instead), and the earlier ones before it."""
+    def jobs(results, run_id):
+        return [job("plan", "success", id=run_id * 10, run_id=run_id)] + [
+            job(name, conclusion, id=run_id * 10 + i, run_id=run_id) for i, (name, conclusion) in enumerate(results.items(), 1)
+        ]
+
+    runs = {100: jobs(RECHECK_TIMELINE[now][1], 100) if current is None else current}
+    for i in reversed(range(now)):
+        runs[i + 1] = jobs(RECHECK_TIMELINE[i][1], i + 1)
+    return runs
+
+
+@contextlib.contextmanager
+def fake_api(fake):
+    """`fake` (a FakeServices) as a local GitHub API for the planner, which
+    runs in its own process; yields the API URL and the paths requested."""
+    paths = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            paths.append(self.path)
+            try:
+                status, body = 200, fake(f"http://api{self.path}").encode()
+            except Exception:
+                status, body = 500, b"{}"
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", paths
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class Recheck(unittest.TestCase):
+    """On the 2-hour schedule, nightly canaries whose latest result is red run too."""
+
+    run_plan = Planner.run_plan
+
+    TWO_HOURS = "0 */2 * * *"
+    NIGHTLY = "30 5 * * *"
+
+    def entry(self, name, cadence, variants=None):
+        entry = {"name": name, "repo": f"o/{name}", "cadence": cadence, "test": "pytest"}
+        return entry | ({"variants": [{"label": label} for label in variants]} if variants else {})
+
+    def planned(self, entries, runs, schedule=TWO_HOURS, **env):
+        """Job names the planner chooses with `runs` as the history, the
+        planner's stderr, and the API paths it requested."""
+        with fake_api(FakeServices(runs)) as (api, paths):
+            env = {"SCHEDULE": schedule, "GITHUB_API_URL": api, "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "100", "GH_TOKEN": "t"} | env
+            result = self.run_plan(entries, **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return [job["name"] for job in json.loads(result.stdout)["include"]], result.stderr, paths
+
+    ENTRIES = [
+        ("fast", "2h"),
+        ("red", "nightly"),
+        ("green", "nightly"),
+        ("fixed", "nightly"),
+        ("parts", "nightly", ["x", "y"]),
+        ("new", "nightly"),
+    ]
+    RUNS = {
+        100: [job("plan", None, run_id=100)],  # this run, planning
+        99: [job("fast", "success", run_id=99), job("red", "failure", run_id=99), job("fixed", "success", run_id=99)],  # a 2-hour run that re-checked two
+        98: [job("fast", "cancelled", run_id=98), job("parts (x)", "failure", run_id=98)],  # a re-run that only got one part done
+        97: [job(name, "failure" if name != "green" else "success", run_id=97) for name in ("fast", "red", "green", "fixed", "parts (x)", "parts (y)")],
+    }
+
+    def entries(self):
+        return [self.entry(*e) for e in self.ENTRIES]
+
+    def test_red_nightly_canaries_run_on_the_2_hour_schedule(self):
+        names, log, _ = self.planned(self.entries(), self.RUNS)
+        # `fixed` recovered on its last re-check; `new` has no result yet.
+        self.assertEqual(names, ["fast", "red", "parts (x)", "parts (y)"])
+        self.assertIn("Re-checking red nightly canaries: parts, red", log)
+        self.assertIn("::warning::No result for new in the last 30 scheduled runs", log)
+        self.assertEqual(log.splitlines()[-1], "4")
+
+    def test_a_canary_is_red_if_any_part_is(self):
+        runs = {100: [], 99: [job("parts (x)", "success", run_id=99), job("parts (y)", "failure", run_id=99)]}
+        names, _, _ = self.planned([self.entry("parts", "nightly", ["x", "y"])], runs)
+        self.assertEqual(names, ["parts (x)", "parts (y)"])
+        runs = {100: [], 99: [job("parts (x)", "success", run_id=99), job("parts (y)", "skipped", run_id=99)]}
+        self.assertEqual(self.planned([self.entry("parts", "nightly", ["x", "y"])], runs)[0], [])
+
+    def test_other_selections_are_unchanged_and_read_nothing(self):
+        cases = [
+            ({"schedule": self.NIGHTLY}, ["fast", "red", "green", "fixed", "parts (x)", "parts (y)", "new"]),
+            ({"schedule": "", "ONLY": "green"}, ["green"]),
+            ({"schedule": "", "CHANGED_FILES": "canaries/green.yml"}, ["green"]),
+            ({"schedule": ""}, ["fast", "red", "green", "fixed", "parts (x)", "parts (y)", "new"]),
+        ]
+        for env, expected in cases:
+            with self.subTest(env=env):
+                names, _, paths = self.planned(self.entries(), self.RUNS, **env)
+                self.assertEqual(names, expected)
+                self.assertEqual(paths, [])
+
+    def test_an_unreadable_history_rechecks_nothing(self):
+        fake = FakeServices(self.RUNS)
+        fake.runs = {}  # every request for jobs fails
+        with fake_api(fake) as (api, _):
+            env = {"SCHEDULE": self.TWO_HOURS, "GITHUB_API_URL": api, "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "100", "GH_TOKEN": "t"}
+            result = self.run_plan(self.entries(), **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([j["name"] for j in json.loads(result.stdout)["include"]], ["fast"])
+        self.assertIn("::warning::Couldn't read red's latest result", result.stderr)
+        # No API at all.
+        env |= {"GITHUB_API_URL": "http://127.0.0.1:9"}
+        result = self.run_plan(self.entries(), **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([j["name"] for j in json.loads(result.stdout)["include"]], ["fast"])
+        self.assertIn("::warning::Couldn't read this run", result.stderr)
+
+    def test_the_history_searched_is_bounded(self):
+        runs = {100: []} | {1000 + n: [job("fast", "success", run_id=1000 + n)] for n in range(1, 200)}
+        names, log, paths = self.planned([self.entry("fast", "2h"), self.entry("new", "nightly"), self.entry("old", "nightly")], runs)
+        self.assertEqual(names, ["fast"])
+        jobs = [p for p in paths if p.endswith("/jobs") or "/jobs?" in p]
+        listings = [p for p in paths if "/workflows/" in p]
+        # Each earlier run's jobs are read once, whichever canaries look at them.
+        self.assertEqual(len(jobs), 30)
+        self.assertEqual(len(set(jobs)), 30)
+        self.assertLessEqual(len(listings), 2)
+        self.assertTrue(all("per_page=31" in p for p in listings))
+        self.assertIn("No result for old", log)
+
+    def test_the_planner_rechecks_what_the_notifier_calls_red(self):
+        """Along RECHECK_TIMELINE, each 2-hour run includes `n` exactly while
+        its latest result is red."""
+        entries = [self.entry("fast", "2h"), self.entry("n", "nightly")]
+        for now, (schedule, results) in enumerate(RECHECK_TIMELINE):
+            if schedule != "2h":
+                continue
+            with self.subTest(run=now):
+                names, _, _ = self.planned(entries, timeline_runs(now, current=[]))
+                self.assertEqual("n" in names, "n" in results)
 
 
 if __name__ == "__main__":

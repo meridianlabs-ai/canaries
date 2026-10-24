@@ -2,7 +2,7 @@ name: canary
 
 on:
   schedule:
-    - cron: "0 */2 * * *" # 2h canaries
+    - cron: "0 */2 * * *" # 2h canaries, and nightly ones whose latest result is red
     - cron: "30 5 * * *" # nightly canaries (and the 2h ones)
   workflow_dispatch:
     inputs:
@@ -30,9 +30,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Runs only this repository's code. Reads earlier runs' job results (not logs)
+  # to re-check red nightly canaries on the 2-hour schedule; no secrets.
   plan:
     if: ${{ !inputs.test_slack && !inputs.repost_run }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       count: ${{ steps.plan.outputs.count }}
@@ -48,15 +53,21 @@ jobs:
           ONLY: ${{ inputs.only }}
           SCHEDULE: ${{ github.event.schedule }}
           IS_PR: ${{ github.event_name == 'pull_request' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ "$IS_PR" = "true" ]; then
             CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD)
             export CHANGED_FILES
           fi
           for f in canaries/*.yml; do yq -o=json -I=0 '.' "$f"; done > "$RUNNER_TEMP/canaries.jsonl"
-          matrix=$(python3 scripts/plan.py "$RUNNER_TEMP/canaries.jsonl" 2> "$RUNNER_TEMP/count")
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "count=$(cat "$RUNNER_TEMP/count")" >> "$GITHUB_OUTPUT"
+          if ! python3 scripts/plan.py "$RUNNER_TEMP/canaries.jsonl" > "$RUNNER_TEMP/matrix" 2> "$RUNNER_TEMP/plan.log"; then
+            cat "$RUNNER_TEMP/plan.log"
+            exit 1
+          fi
+          # The planner's messages, then the number of jobs on the last line.
+          sed '$d' "$RUNNER_TEMP/plan.log"
+          echo "matrix=$(cat "$RUNNER_TEMP/matrix")" >> "$GITHUB_OUTPUT"
+          echo "count=$(tail -n 1 "$RUNNER_TEMP/plan.log")" >> "$GITHUB_OUTPUT"
 
   # Installs and runs unvetted releases. Holds no secrets, saves and restores
   # no cache, and produces nothing any other job consumes. One job per canary,
