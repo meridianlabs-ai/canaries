@@ -1,15 +1,11 @@
 name: test
 
+# On every pull request and push to main, so it can be a required check (a
+# path-filtered required check never reports on PRs outside its paths).
 on:
   pull_request:
-    paths:
-      - scripts/**
-      - .github/workflows/test.yml
   push:
     branches: [main]
-    paths:
-      - scripts/**
-      - .github/workflows/test.yml
 
 permissions:
   contents: read
