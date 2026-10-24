@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: Run only this canary (its name in canaries/)
+        description: Run only this canary, all its variants (its name in canaries/)
         required: false
       test_slack:
         description: Only send a test message to the alert channel
@@ -59,7 +59,8 @@ jobs:
           echo "count=$(cat "$RUNNER_TEMP/count")" >> "$GITHUB_OUTPUT"
 
   # Installs and runs unvetted releases. Holds no secrets, saves and restores
-  # no cache, and produces nothing any other job consumes.
+  # no cache, and produces nothing any other job consumes. One job per canary,
+  # or per variant (`<canary> (<label>)`), all in parallel.
   canary:
     needs: plan
     if: ${{ needs.plan.outputs.count != '0' }}
