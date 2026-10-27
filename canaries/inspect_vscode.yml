@@ -41,10 +41,10 @@ test: |
   echo "::group::lint"; pnpm lint || status=1; echo "::endgroup::"
   echo "::group::build"; pnpm build || status=1; echo "::endgroup::"
   echo "::group::build:production"; pnpm build:production || status=1; echo "::endgroup::"
-  # The six view-asset tests (view-path-integration) skip here as in the repo's own CI: VS Code's
-  # Linux test host rebuilds PATH from a login shell, so inspect/scout in .venv/bin aren't found.
-  # Making them visible needs VSCODE_CLI=1, which fails Scout's view-assets suite on mocha's 2 s
-  # hook timeout, so they're left skipped; proxy-routes covers the route table, not asset layout.
+  # The six view-asset tests skip here because inspect/scout in .venv/bin aren't on the extension test
+  # host's PATH (VS Code's Linux test host rebuilds PATH from a login shell); they also skip in the repo's
+  # own CI, where inspect/scout aren't installed. VSCODE_CLI=1 makes Scout's suite fail on mocha's 2 s hook
+  # timeout, so left skipped; proxy-routes covers the route table, not asset layout.
   echo "::group::test"; REQUIRE_FISH_TESTS=1 REQUIRE_PWSH_TESTS=1 xvfb-run -a pnpm test || status=1; echo "::endgroup::"
   # The canary's `uv venv` leaves a .venv the repo's .vscodeignore doesn't cover;
   # without this vsce packages .venv/lib64 (a symlink to a dir) and dies EISDIR.
