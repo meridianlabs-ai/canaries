@@ -10,8 +10,9 @@ A repository's token cannot list organization secrets. Instead `secrets.yml`
 checks the `secrets` context by name each day, on pushes to `main`, and on
 pull requests. On Dependabot pull request runs, the context holds Dependabot
 secrets in place of Actions secrets. So those runs fail on any Dependabot secret
-visible to this repository. Codespaces and Copilot agent organization secrets
-are not covered: they do not reach Actions runs.
+visible to this repository. Fork pull request runs get only `github_token`, so
+they prove nothing. Codespaces and Copilot agent organization secrets are not
+covered: they do not reach Actions runs.
 """
 
 import json

@@ -9,10 +9,10 @@ extra name is a problem either way.
 
 On Dependabot pull request runs, the context holds Dependabot secrets in place
 of Actions secrets. So those runs fail on any Dependabot secret visible to this
-repository. Codespaces and Copilot agent organization secrets are not covered:
-they do not reach Actions runs. Listing them needs a token with
-organization-level read access to those secrets, which this repository does not
-hold.
+repository. Fork pull request runs get only `github_token`, so they prove
+nothing. Codespaces and Copilot agent organization secrets are not covered:
+they do not reach Actions runs. To list them, a token needs organization-level
+read access. This repository holds no such token.
 
 An absent `SECRETS_JSON` is a coding error in the workflow, so this check
 raises. Standard library only.
