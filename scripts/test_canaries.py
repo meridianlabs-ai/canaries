@@ -40,10 +40,12 @@ def load(path):
         return yaml.safe_load(f)
 
 
-def uncommented(text):
-    """`text` with shell comments dropped: a `#` that begins a word (the start
-    of a line or after whitespace) starts a comment, so `pytest # pyright` loses
-    `pyright` while `a#b` keeps its `#`."""
+def scrubbed(text):
+    """`text` with shell comments and `::group::` log labels dropped, so a
+    checker named only in a label (`echo "::group::pyright"`) doesn't count. A
+    `#` that begins a word (the start of a line or after whitespace) starts a
+    comment, so `pytest # pyright` loses `pyright` while `a#b` keeps its `#`."""
+    text = re.sub(r'"::group::[^"]*"', "", text)
     return "\n".join(re.sub(r"(^|\s)#.*", "", line) for line in text.splitlines())
 
 
@@ -61,7 +63,7 @@ def runs_static_analysis(canary):
     exempt = canary.get("static-analysis-exempt")
     if isinstance(exempt, str) and exempt.strip():
         return True
-    return any(CHECKER.search(uncommented(test)) for test in effective_tests(canary))
+    return any(CHECKER.search(scrubbed(test)) for test in effective_tests(canary))
 
 
 class RunsStaticAnalysis(unittest.TestCase):
@@ -95,6 +97,15 @@ class RunsStaticAnalysis(unittest.TestCase):
     def test_inline_comment_fails(self):
         # A `#` after a space starts a comment, so this pyright doesn't count.
         self.assertFalse(runs_static_analysis({"test": "uv run --no-sync pytest -ra # pyright"}))
+
+    def test_group_label_only_fails(self):
+        # A checker named only in a `::group::` log label isn't run.
+        self.assertFalse(runs_static_analysis({"test": 'echo "::group::pyright"; uv run --no-sync pytest || status=1'}))
+
+    def test_group_label_plus_real_command_passes(self):
+        self.assertTrue(
+            runs_static_analysis({"test": 'echo "::group::pyright"; uv run --no-sync pyright || status=1; echo "::endgroup::"'})
+        )
 
     def test_top_level_checker_overridden_by_every_variant_fails(self):
         # Every effective job replaces the top-level test, so pyright never runs.
