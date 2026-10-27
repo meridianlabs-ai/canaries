@@ -1,21 +1,49 @@
-# The extension's webview proxy rejects any view-server route it doesn't
-# recognize. This dumps the routes the newest inspect-ai and inspect-scout
-# releases serve and checks each one against the proxy's table, so a new
-# upstream endpoint shows up here rather than as a silently broken panel.
-# Replaces inspect_vscode's proxy-routes.yml.
+# Runs inspect_vscode's CI checks against the newest releases of everything:
+# eslint (pnpm lint), the TypeScript compile (pnpm compile-tests), the webpack
+# dev and production builds, the vsce package, and the extension tests under a
+# virtual display. Plus the proxy-routes check: the extension's webview proxy
+# rejects any view-server route it doesn't recognize, so this dumps the routes
+# the newest inspect-ai and inspect-scout releases serve and checks each one
+# against the proxy's table, so a new upstream endpoint shows up here rather
+# than as a silently broken panel. Replaces inspect_vscode's proxy-routes.yml.
 name: inspect_vscode
 repo: meridianlabs-ai/inspect_vscode
 ref: main
 cadence: nightly
 python: "3.12"
 node: "22"
-timeout-minutes: 20
+timeout-minutes: 30
 install: |
   corepack enable
-  pnpm install --frozen-lockfile
+  # Frontier install: ignore the lockfile and the 7-day cooldown that
+  # pnpm-workspace.yaml sets, to get the newest releases in range. pnpm 10
+  # honors these only as --config.* flags (env vars don't work here), and
+  # CI=true would otherwise force a frozen install.
+  pnpm install --config.lockfile=false --config.minimumReleaseAge=0
+  # The extension tests drive a real VS Code: xvfb gives it a display, and the
+  # shell-integration tests need fish (ubuntu-latest already ships PowerShell).
+  sudo apt-get update
+  sudo apt-get install -y xvfb fish
   uv venv
   uv pip install --exclude-newer false inspect-ai inspect-scout
 test: |
-  .venv/bin/python scripts/proxy-routes/dump-openapi.py --out out/proxy-routes
-  pnpm compile-tests
-  node scripts/proxy-routes/check.mjs
+  # Every check runs; the step fails if any did.
+  status=0
+  # The proxy-routes check: dump the newest servers' routes, compile the proxy
+  # table (also the TypeScript type check), then check each route against it.
+  # These three run in order; check.mjs needs compile-tests' output.
+  echo "::group::proxy-routes"
+  .venv/bin/python scripts/proxy-routes/dump-openapi.py --out out/proxy-routes \
+    && pnpm compile-tests \
+    && node scripts/proxy-routes/check.mjs \
+    || status=1
+  echo "::endgroup::"
+  echo "::group::lint"; pnpm lint || status=1; echo "::endgroup::"
+  echo "::group::build"; pnpm build || status=1; echo "::endgroup::"
+  echo "::group::build:production"; pnpm build:production || status=1; echo "::endgroup::"
+  echo "::group::test"; REQUIRE_FISH_TESTS=1 REQUIRE_PWSH_TESTS=1 xvfb-run -a pnpm test || status=1; echo "::endgroup::"
+  # The canary's `uv venv` leaves a .venv the repo's .vscodeignore doesn't cover;
+  # without this vsce packages .venv/lib64 (a symlink to a dir) and dies EISDIR.
+  printf '\n.venv/**\n' >> .vscodeignore
+  echo "::group::vsce:package"; pnpm vsce:package || status=1; echo "::endgroup::"
+  exit $status
