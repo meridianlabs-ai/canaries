@@ -1,5 +1,5 @@
-# inspect_petri's offline test suite on the newest releases of everything (its own
-# uv.lock and any exclude-newer window ignored).
+# inspect_petri's offline test suite and pyright on the newest releases of
+# everything (its own uv.lock and any exclude-newer window ignored).
 name: inspect_petri
 repo: meridianlabs-ai/inspect_petri
 ref: main
@@ -10,4 +10,10 @@ install: |
   uv venv
   uv pip install --exclude-newer false -e . --group dev
 test: |
-  uv run --no-sync pytest -ra
+  # Every check runs; the step fails if any did.
+  status=0
+  # py-test job of inspect_petri's build.yaml.
+  echo "::group::pytest"; uv run --no-sync pytest -ra || status=1; echo "::endgroup::"
+  # py-pyright job of inspect_petri's build.yaml.
+  echo "::group::pyright"; uv run --no-sync pyright || status=1; echo "::endgroup::"
+  exit $status
