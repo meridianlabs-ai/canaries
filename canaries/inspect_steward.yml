@@ -3,11 +3,11 @@
 # in parallel so a break alerts once:
 #  - offline: the default suite (-m "not network") and pyright, as inspect_steward's
 #    build.yaml runs them;
-#  - network: the network-marked tests, which nothing runs today (CI runs
-#    -m "not network" on every leg). They need the hawk extra (Python 3.13+, so
-#    this part runs on 3.14), network and the uv binary, and sole use of the
-#    environment because hawk's CLI rewrites the venv (pyproject's `network`
-#    marker; run with -n0).
+#  - hawk: the whole suite with the hawk extra, which nothing runs today. The
+#    extra needs Python 3.13+, so this part runs on 3.14; on 3.12 it is empty,
+#    so the network-marked tests and the requires_hawk tests both skip. It needs
+#    network and the uv binary, and sole use of the environment because hawk's
+#    CLI rewrites the venv (pyproject's `network` marker; run with -n0).
 name: inspect_steward
 repo: meridianlabs-ai/inspect_steward
 ref: main
@@ -27,15 +27,18 @@ variants:
       # py-pyright job of inspect_steward's build.yaml (uv run pyright).
       echo "::group::pyright"; uv run --no-sync pyright || status=1; echo "::endgroup::"
       exit $status
-  - label: network
+  - label: hawk
     python: "3.14"
-    # hawk (the [hawk] extra) needs Python 3.13+, so the network tests only
-    # resolve a hawk here; on 3.12 the extra is empty and they are unavailable.
+    # hawk (the [hawk] extra) needs Python 3.13+, so it resolves only here; on
+    # 3.12 the extra is empty and its tests skip.
     install: |
       uv venv
       uv pip install --exclude-newer false -e ".[hawk]" --group dev
     test: |
-      # The network tests shell out to `uv pip install` into this venv, so they
-      # run alone (-n0) and get the whole environment to themselves. Nothing in
-      # CI runs them. (inspect_steward's pyproject `network` marker.)
-      uv run --no-sync pytest -ra -m network -n0
+      # The whole suite on 3.14 with hawk: `-m ""` overrides the `-m 'not
+      # network'` in addopts to select everything, so the network-marked tests
+      # and the requires_hawk tests (which -m network misses and 3.12 skips)
+      # both run -- nothing in CI runs them. hawk's CLI shells out to `uv pip
+      # install` into this venv, so it runs alone (-n0) with the environment to
+      # itself (inspect_steward's pyproject `network` marker).
+      uv run --no-sync pytest -ra -n0 -m ""

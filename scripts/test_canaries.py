@@ -3,9 +3,12 @@
 A canary catches breakage from the newest, unlocked releases of its
 dependencies, so it runs every static analysis tool its repository's CI runs
 (ruff and prettier excepted; see README.md, "What a canary runs"). This test
-fails a canary whose install and test scripts call no type checker (mypy,
-pyright, tsc) or eslint, unless the file sets `static-analysis-exempt` to a
-reason string.
+fails a canary whose test script calls no type checker (mypy, pyright, tsc) or
+eslint in any of its effective jobs, unless the file sets
+`static-analysis-exempt` to a reason string.
+
+It is a tripwire against forgetting, not a proof: it only looks for a checker
+in the test script -- not that it runs over the right files, or at all.
 """
 
 import glob
@@ -37,23 +40,28 @@ def load(path):
         return yaml.safe_load(f)
 
 
-def scripts_text(canary):
-    """The install and test scripts of the canary and its variants, with comment
-    lines dropped so a comment that only mentions a checker doesn't count."""
-    blocks = [canary.get("install", ""), canary.get("test", "")]
-    for variant in canary.get("variants") or []:
-        blocks += [variant.get("install", ""), variant.get("test", "")]
-    code = (line for block in blocks for line in block.splitlines() if not line.lstrip().startswith("#"))
-    return "\n".join(code)
+def uncommented(text):
+    """`text` with shell comments dropped: a `#` that begins a word (the start
+    of a line or after whitespace) starts a comment, so `pytest # pyright` loses
+    `pyright` while `a#b` keeps its `#`."""
+    return "\n".join(re.sub(r"(^|\s)#.*", "", line) for line in text.splitlines())
+
+
+def effective_tests(canary):
+    """The test script of each effective job: the canary merged with each of its
+    variants the way scripts/plan.py's jobs() does, so a variant's keys override
+    the top level. Install scripts don't count -- installing a checker (e.g.
+    `uv pip install pyright`) isn't running it."""
+    return [(canary | variant).get("test", "") for variant in canary.get("variants") or [{}]]
 
 
 def runs_static_analysis(canary):
-    """True if the canary runs a type checker or eslint, or sets a non-empty
-    `static-analysis-exempt` reason."""
+    """True if some effective job's test script runs a type checker or eslint, or
+    the canary sets a non-empty `static-analysis-exempt` reason."""
     exempt = canary.get("static-analysis-exempt")
     if isinstance(exempt, str) and exempt.strip():
         return True
-    return bool(CHECKER.search(scripts_text(canary)))
+    return any(CHECKER.search(uncommented(test)) for test in effective_tests(canary))
 
 
 class RunsStaticAnalysis(unittest.TestCase):
@@ -76,6 +84,45 @@ class RunsStaticAnalysis(unittest.TestCase):
             "variants": [
                 {"label": "a", "test": "uv run --no-sync pytest -ra"},
                 {"label": "b", "test": "uv run --no-sync pyright"},
+            ],
+        }
+        self.assertTrue(runs_static_analysis(canary))
+
+    def test_checker_only_in_install_fails(self):
+        # Installing a checker isn't running it; only the test script counts.
+        self.assertFalse(runs_static_analysis({"install": "uv pip install pyright", "test": "uv run --no-sync pytest -ra"}))
+
+    def test_inline_comment_fails(self):
+        # A `#` after a space starts a comment, so this pyright doesn't count.
+        self.assertFalse(runs_static_analysis({"test": "uv run --no-sync pytest -ra # pyright"}))
+
+    def test_top_level_checker_overridden_by_every_variant_fails(self):
+        # Every effective job replaces the top-level test, so pyright never runs.
+        canary = {
+            "test": "uv run --no-sync pyright",
+            "variants": [
+                {"label": "a", "test": "uv run --no-sync pytest -ra"},
+                {"label": "b", "test": "uv run --no-sync pytest -ra -n0 -m network"},
+            ],
+        }
+        self.assertFalse(runs_static_analysis(canary))
+
+    def test_top_level_test_kept_when_variants_override_only_install_passes(self):
+        # The variants keep the top-level test, so its pyright runs in each job.
+        canary = {
+            "test": "uv run --no-sync pyright\nuv run --no-sync pytest -ra",
+            "variants": [
+                {"label": "a", "install": "uv venv"},
+                {"label": "b", "install": "uv pip install -e .[hawk]"},
+            ],
+        }
+        self.assertTrue(runs_static_analysis(canary))
+
+    def test_variants_overriding_test_with_a_checker_pass(self):
+        canary = {
+            "variants": [
+                {"label": "a", "test": "uv run --no-sync pyright"},
+                {"label": "b", "test": "uv run --no-sync mypy src"},
             ],
         }
         self.assertTrue(runs_static_analysis(canary))

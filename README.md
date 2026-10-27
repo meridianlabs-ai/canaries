@@ -36,9 +36,9 @@ Two tools are left out: ruff and prettier. They check only our own code's style,
 
 Repository checks that read only our own files are left out for the same reason: suppression ledgers, config carve-out ledgers, docstring and override checks, pre-commit hooks, and a rebuilt `dist/` compared to the committed one. A new dependency release can't change what they report. Checks of generated files — schemas, generated types — stay in, because their output depends on the installed packages.
 
-Each canary runs one Python version, the one in its file. CI covers the version matrix against the lockfile.
+Each canary runs one Python version, the one in its file, except inspect_steward's hawk part, which runs on 3.14 because the hawk extra needs Python 3.13+. CI covers the version matrix against the lockfile.
 
-When you add or change a canary, compare it with the repository's `.github/workflows`. [`scripts/test_canaries.py`](scripts/test_canaries.py) fails any canary whose install and test scripts call no type checker (mypy, pyright, tsc) or eslint, so the principle can't quietly drift. A canary whose repository has none sets `static-analysis-exempt` to a reason instead.
+When you add or change a canary, compare it with the repository's `.github/workflows`. [`scripts/test_canaries.py`](scripts/test_canaries.py) fails any canary whose test script calls no type checker (mypy, pyright, tsc) or eslint, so the principle can't quietly drift. A canary whose repository has none sets `static-analysis-exempt` to a reason instead.
 
 ## Adding a canary
 
