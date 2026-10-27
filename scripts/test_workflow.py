@@ -8,8 +8,10 @@ repository's own code. These tests fail if a workflow change breaks any of it.
 
 A repository's token cannot list organization secrets. Instead `secrets.yml`
 checks the `secrets` context by name each day, on pushes to `main`, and on
-pull requests. It does not cover Dependabot, Codespaces or Copilot agent
-organization secrets, because they do not reach canary Actions runs.
+pull requests. On Dependabot pull request runs, the context holds Dependabot
+secrets in place of Actions secrets. So those runs fail on any Dependabot secret
+visible to this repository. Codespaces and Copilot agent organization secrets
+are not covered: they do not reach Actions runs.
 """
 
 import json
