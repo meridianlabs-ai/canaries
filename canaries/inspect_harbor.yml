@@ -1,21 +1,46 @@
-# inspect_harbor's Harbor adapter against the newest harbor release, on the
-# newest Python in its CI: loads one task from every hub dataset, then compares
-# every field inspect_harbor reads with what harbor's own loader produces. Uses
-# the network (the Harbor hub). Replaces inspect_harbor's harbor-parity.yml.
+# inspect_harbor's Harbor adapter against the newest releases of everything, on
+# the newest Python in its CI, in two parts that run in parallel so a break
+# alerts once:
+#  - parity: loads one task from every hub dataset, then compares every field
+#    inspect_harbor reads with what harbor's own loader produces (its own
+#    isolated venv: harbor beside inspect_harbor, no dev closure);
+#  - dev: pyright and the repo test suite, as inspect_harbor's build.yaml runs
+#    them (py-type and py-test).
+# Both use the Harbor hub. Replaces inspect_harbor's harbor-parity.yml.
 name: inspect_harbor
 repo: meridianlabs-ai/inspect_harbor
 ref: main
 cadence: nightly
 python: "3.14"
 timeout-minutes: 30
+# The parity part installs harbor beside inspect_harbor, without the dev
+# closure. The dev part overrides this with the dev group.
 install: |
   uv venv
   uv pip install --exclude-newer false harbor pytest pytest-asyncio pyyaml -e .
-test: |
-  export INSPECT_HARBOR_NO_TELEMETRY=1
-  export INSPECT_HARBOR_CACHE_DIR="$PWD/.parity-cache"
-  echo "::group::Warm the dataset cache"; uv run --no-sync python scripts/parity_warm_cache.py; echo "::endgroup::"
-  # The test imports harbor internals with importorskip. If a release moves one,
-  # the module skips and pytest exits 5 (no tests collected), which fails here;
-  # -rs names what went missing.
-  echo "::group::Parity"; uv run --no-sync pytest tests/manual/test_harbor_parity.py -q -rs -p no:cacheprovider; echo "::endgroup::"
+variants:
+  - label: parity
+    test: |
+      export INSPECT_HARBOR_NO_TELEMETRY=1
+      export INSPECT_HARBOR_CACHE_DIR="$PWD/.parity-cache"
+      echo "::group::Warm the dataset cache"; uv run --no-sync python scripts/parity_warm_cache.py; echo "::endgroup::"
+      # The test imports harbor internals with importorskip. If a release moves one,
+      # the module skips and pytest exits 5 (no tests collected), which fails here;
+      # -rs names what went missing.
+      echo "::group::Parity"; uv run --no-sync pytest tests/manual/test_harbor_parity.py -q -rs -p no:cacheprovider; echo "::endgroup::"
+  - label: dev
+    install: |
+      uv venv
+      uv pip install --exclude-newer false -e . --group dev
+    test: |
+      # Every check runs; the step fails if any did.
+      status=0
+      # py-type job of inspect_harbor's build.yaml (uv run pyright).
+      echo "::group::pyright"; uv run --no-sync pyright || status=1; echo "::endgroup::"
+      # py-test job of inspect_harbor's build.yaml. pyproject's addopts ignores
+      # tests/manual, so this is the repo suite (the parity part runs the manual
+      # parity test).
+      echo "::group::pytest"
+      uv run --no-sync pytest --cov=inspect_harbor --cov-report=term --cov-report=xml --cov-branch || status=1
+      echo "::endgroup::"
+      exit $status
