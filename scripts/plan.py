@@ -35,12 +35,28 @@ entries = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 # `a (1)`) without spaces or parentheses, so each job name maps back to
 # exactly one canary; scripts/notify.py parses job names with the same pattern.
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+GIT_URL = re.compile(r"git\+\S+")
 VARIANT_FIELDS = {"label", "python", "install", "test", "runs-on", "node", "timeout-minutes"}
 RULE = "a string of letters, digits, '.', '_' or '-' (quote it if YAML would read a number or boolean)"
 
 
 def valid(value):
     return isinstance(value, str) and NAME.fullmatch(value)
+
+
+def pinned_to_main(url):
+    """True if a pip `git+` URL checks out main: after the `#...` fragment is
+    removed, its ref -- the part after the last '@' -- is `main` not followed by
+    a letter, digit, '_', '.', '/' or '-' (so trailing shell like `>/dev/null`
+    is ignored, but `main-old` is not main). An unpinned URL (no
+    '@ref') keeps the default branch, so it fails."""
+    ref = url.split("#")[0].split("@")[-1]
+    return bool(re.match(r"main(?![\w./-])", ref))
+
+
+def unpinned_git_url(script):
+    """The first `git+` URL in `script` not pinned to `@main`, or None."""
+    return next((url for url in GIT_URL.findall(script or "") if not pinned_to_main(url)), None)
 
 
 def jobs(canary):
@@ -58,6 +74,9 @@ for e in entries:
         sys.exit("plan and notify are the workflow's own job names; a canary can't use them")
     if e.get("ref") != "main":
         sys.exit(f"{e['name']}: ref must be 'main', not {e.get('ref')!r}")
+    bad = unpinned_git_url(e.get("install"))
+    if bad:
+        sys.exit(f"{e['name']}: install git+ URL {bad!r} must pin @main")
     variants = e.get("variants")
     if variants is None:
         continue
@@ -69,6 +88,9 @@ for e in entries:
             sys.exit(f"{e['name']}: variant label {label!r} must be {RULE}")
         if v.keys() - VARIANT_FIELDS:
             sys.exit(f"{e['name']} ({v['label']}): a variant can only set {', '.join(sorted(VARIANT_FIELDS))}")
+        bad = unpinned_git_url(v.get("install"))
+        if bad:
+            sys.exit(f"{e['name']} ({v['label']}): install git+ URL {bad!r} must pin @main")
 
 names = [e["name"] for e in entries]
 if len(names) != len(set(names)):

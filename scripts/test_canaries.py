@@ -184,6 +184,57 @@ class TargetRef(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class InstallGitUrls(unittest.TestCase):
+    # Every git+ URL in an install script must pin @main, so a canary can't drift
+    # onto a dependency's default branch.
+    BASE = {"name": "x", "repo": "o/r", "ref": "main"}
+
+    def test_unpinned_git_url_fails(self):
+        result = plan([{**self.BASE, "install": "uv pip install git+https://github.com/o/r.git"}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("@main", result.stderr)
+
+    def test_git_url_pinned_to_another_ref_fails(self):
+        result = plan([{**self.BASE, "install": "uv pip install git+https://github.com/o/r.git@meridian"}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("@main", result.stderr)
+
+    def test_git_url_pinned_to_main_passes(self):
+        result = plan([{**self.BASE, "install": "uv pip install git+https://github.com/o/r.git@main"}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_quoted_git_url_pinned_to_main_passes(self):
+        result = plan([{**self.BASE, "install": 'uv pip install "git+https://github.com/o/r.git@main"'}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_git_url_with_ref_before_fragment_fails(self):
+        result = plan([{**self.BASE, "install": "uv pip install git+https://github.com/o/r.git@dev#subdirectory=pkg@main"}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("@main", result.stderr)
+
+    def test_install_without_a_git_url_passes(self):
+        result = plan([{**self.BASE, "install": "uv pip install -e .[dev]"}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unpinned_git_url_in_a_variant_fails(self):
+        result = plan([{**self.BASE, "variants": [{"label": "a", "install": "pip install git+https://github.com/o/r.git"}]}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("@main", result.stderr)
+
+    def test_git_url_followed_by_a_shell_separator_passes(self):
+        result = plan([{**self.BASE, "install": "pip install git+https://github.com/o/r.git@main; echo done"}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_git_url_followed_by_a_redirect_passes(self):
+        result = plan([{**self.BASE, "install": "pip install git+https://github.com/o/r.git@main>/dev/null"}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_git_url_pinned_to_a_main_prefixed_ref_fails(self):
+        result = plan([{**self.BASE, "install": "pip install git+https://github.com/o/r.git@main-old"}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("@main", result.stderr)
+
+
 class RealCanaries(unittest.TestCase):
     def test_every_canary_runs_static_analysis(self):
         paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
@@ -197,7 +248,8 @@ class RealCanaries(unittest.TestCase):
                 )
 
     def test_every_canary_passes_the_planner(self):
-        # Runs plan.py over the real files, so a wrong ref in any canary fails CI.
+        # Runs plan.py over the real files, so a wrong ref (or an unpinned git+
+        # install URL) in any canary fails CI.
         paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
         self.assertTrue(paths, "no canaries found")
         result = plan([load(path) for path in paths])
