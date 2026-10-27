@@ -38,8 +38,6 @@ Two CI steps are left out: ruff and prettier. They check only our own code's sty
 
 Repository checks that read only our own files are left out for the same reason: suppression ledgers, config carve-out ledgers, docstring and override checks, pre-commit hooks, and a rebuilt `dist/` compared to the committed one. A new dependency release can't change what they report. Checks of generated files — schemas, generated types — stay in, because their output depends on the installed packages.
 
-CI covers the Python version matrix against the lockfile.
-
 When you add or change a canary, compare it with the repository's `.github/workflows`. [`scripts/test_canaries.py`](scripts/test_canaries.py) fails any canary whose test script calls no type checker (mypy, pyright, tsc) or eslint, so the principle can't quietly drift. A canary whose repository has none sets `static-analysis-exempt` to a reason instead.
 
 ## Adding a canary
