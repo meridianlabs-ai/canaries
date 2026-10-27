@@ -52,4 +52,15 @@ variants:
       export INSPECT_HARBOR_NO_TELEMETRY=1
       # tests/manual is excluded by addopts, so name the file to opt in. It is
       # marked slow but harbor has no --runslow gate, so naming it is enough.
-      uv run --no-sync pytest tests/manual/test_all_registry_tasks.py -q -rs -p no:cacheprovider
+      # Two tasks need provider keys from the host environment and so fail rather
+      # than skip; deselect them. A canary has no secrets, and the principle skips
+      # only tests that need them: minnesotanlp_aar needs GOOGLE_API_KEY,
+      # sierra_research_tau3_bench needs OPENAI_API_KEY.
+      # Five other tasks fail today because inspect_harbor does not support their
+      # compose fields (android_bench 'sysctls', bespokelabs_autoresearch_exam and
+      # biopharma_bench build 'args', drugtargetbench 'secrets', infra_bench_v1
+      # 'group_add'), so this part is red until inspect_harbor supports them or the
+      # maintainers decide otherwise.
+      uv run --no-sync pytest tests/manual/test_all_registry_tasks.py -q -rs -p no:cacheprovider \
+        --deselect 'tests/manual/test_all_registry_tasks.py::test_task_runs_with_one_sample[minnesotanlp_aar]' \
+        --deselect 'tests/manual/test_all_registry_tasks.py::test_task_runs_with_one_sample[sierra_research_tau3_bench]'
