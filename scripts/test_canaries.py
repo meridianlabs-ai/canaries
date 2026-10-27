@@ -124,7 +124,7 @@ class RunsStaticAnalysis(unittest.TestCase):
             "test": "uv run --no-sync pyright\nuv run --no-sync pytest -ra",
             "variants": [
                 {"label": "a", "install": "uv venv"},
-                {"label": "b", "install": "uv pip install -e .[hawk]"},
+                {"label": "b", "install": "uv pip install -e .[dev]"},
             ],
         }
         self.assertTrue(runs_static_analysis(canary))

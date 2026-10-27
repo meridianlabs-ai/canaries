@@ -30,13 +30,15 @@ After each scheduled run, [`scripts/notify.py`](scripts/notify.py) compares ever
 
 ## What a canary runs
 
-A canary exists to catch breakage from the newest, unlocked versions of its dependencies. So each canary runs every static analysis tool its repository's CI runs, plus every test, slow ones included. It skips only tests that need secrets or API keys. Tests marked flaky are not run either.
+A canary exists to catch breakage from the newest, unlocked versions of its dependencies. It runs every test and static analysis step its repository's CI runs, as far as it can, and nothing more. It adds no test, marker, flag or checker that CI doesn't run: if a canary needs one, add it to the repository's CI first. "As far as it can" means it skips tests that need secrets or API keys (a canary has none), and it may cover fewer Python versions than CI's matrix: each part runs one Python version, the one in its file. Tests marked flaky are not run either.
 
-Two tools are left out: ruff and prettier. They check only our own code's style, so a run against the newest dependencies can show only the tool's own rule or format changes, which is noise, and each repository's CI already enforces them against its locked version.
+Slow tests are the one exception to "nothing more". They are tests CI would run if they weren't so slow, so a canary runs a repository's slow tests (with `--runslow` or the repository's equivalent) even when CI skips them for time. Tests that need secrets or API keys still don't run.
+
+Two CI steps are left out: ruff and prettier. They check only our own code's style, so a run against the newest dependencies can show only the tool's own rule or format changes, which is noise, and each repository's CI already enforces them against its locked version.
 
 Repository checks that read only our own files are left out for the same reason: suppression ledgers, config carve-out ledgers, docstring and override checks, pre-commit hooks, and a rebuilt `dist/` compared to the committed one. A new dependency release can't change what they report. Checks of generated files — schemas, generated types — stay in, because their output depends on the installed packages.
 
-Each canary runs one Python version, the one in its file, except inspect_steward's hawk part, which runs on 3.14 because the hawk extra needs Python 3.13+. CI covers the version matrix against the lockfile.
+CI covers the Python version matrix against the lockfile.
 
 When you add or change a canary, compare it with the repository's `.github/workflows`. [`scripts/test_canaries.py`](scripts/test_canaries.py) fails any canary whose test script calls no type checker (mypy, pyright, tsc) or eslint, so the principle can't quietly drift. A canary whose repository has none sets `static-analysis-exempt` to a reason instead.
 
