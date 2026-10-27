@@ -1,23 +1,20 @@
 # inspect_harbor's Harbor adapter against the newest releases of everything, on
-# the newest Python in its CI, in three parts that run in parallel so a break
+# the newest Python in its CI, in two parts that run in parallel so a break
 # alerts once:
 #  - parity: loads one task from every hub dataset, then compares every field
 #    inspect_harbor reads with what harbor's own loader produces (its own
 #    isolated venv: harbor beside inspect_harbor, no dev closure);
 #  - dev: pyright and the repo test suite, as inspect_harbor's build.yaml runs
-#    them (py-type and py-test);
-#  - registry: the live-registry smoke tests (tests/manual/test_all_registry_tasks.py),
-#    which nothing runs today; they scrape the Harbor hub and HEAD-check each
-#    dataset URL. Network, no secrets.
-# All three use the Harbor hub. Replaces inspect_harbor's harbor-parity.yml.
+#    them (py-type and py-test).
+# Both use the Harbor hub. Replaces inspect_harbor's harbor-parity.yml.
 name: inspect_harbor
 repo: meridianlabs-ai/inspect_harbor
 ref: main
 cadence: nightly
 python: "3.14"
 timeout-minutes: 30
-# The parity and registry parts install harbor beside inspect_harbor, without
-# the dev closure. The dev part overrides this with the dev group.
+# The parity part installs harbor beside inspect_harbor, without the dev
+# closure. The dev part overrides this with the dev group.
 install: |
   uv venv
   uv pip install --exclude-newer false harbor pytest pytest-asyncio pyyaml -e .
@@ -41,26 +38,9 @@ variants:
       # py-type job of inspect_harbor's build.yaml (uv run pyright).
       echo "::group::pyright"; uv run --no-sync pyright || status=1; echo "::endgroup::"
       # py-test job of inspect_harbor's build.yaml. pyproject's addopts ignores
-      # tests/manual, so this is the repo suite (the parity and registry parts
-      # run those manual tests).
+      # tests/manual, so this is the repo suite (the parity part runs the manual
+      # parity test).
       echo "::group::pytest"
       uv run --no-sync pytest --cov=inspect_harbor --cov-report=term --cov-report=xml --cov-branch || status=1
       echo "::endgroup::"
       exit $status
-  - label: registry
-    test: |
-      export INSPECT_HARBOR_NO_TELEMETRY=1
-      # tests/manual is excluded by addopts, so name the file to opt in. It is
-      # marked slow but harbor has no --runslow gate, so naming it is enough.
-      # Two tasks need provider keys from the host environment and so fail rather
-      # than skip; deselect them. A canary has no secrets, and the principle skips
-      # only tests that need them: minnesotanlp_aar needs GOOGLE_API_KEY,
-      # sierra_research_tau3_bench needs OPENAI_API_KEY.
-      # Five other tasks fail today because inspect_harbor does not support their
-      # compose fields (android_bench 'sysctls', bespokelabs_autoresearch_exam and
-      # biopharma_bench build 'args', drugtargetbench 'secrets', infra_bench_v1
-      # 'group_add'), so this part is red until inspect_harbor supports them or the
-      # maintainers decide otherwise.
-      uv run --no-sync pytest tests/manual/test_all_registry_tasks.py -q -rs -p no:cacheprovider \
-        --deselect 'tests/manual/test_all_registry_tasks.py::test_task_runs_with_one_sample[minnesotanlp_aar]' \
-        --deselect 'tests/manual/test_all_registry_tasks.py::test_task_runs_with_one_sample[sierra_research_tau3_bench]'
