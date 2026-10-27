@@ -48,7 +48,7 @@ Add a file to `canaries/`, named after the canary:
 # canaries/inspect_ai.yml
 name: inspect_ai            # unique (letters, digits, . _ -); shown in job names and alerts
 repo: UKGovernmentBEIS/inspect_ai
-ref: main
+ref: main                   # must be main
 cadence: 2h                 # 2h or nightly
 python: "3.11"
 timeout-minutes: 60

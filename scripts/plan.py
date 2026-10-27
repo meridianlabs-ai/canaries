@@ -56,6 +56,8 @@ for e in entries:
         sys.exit(f"canary name {e.get('name')!r} must be {RULE}")
     if e["name"] in {"plan", "notify"}:
         sys.exit("plan and notify are the workflow's own job names; a canary can't use them")
+    if e.get("ref") != "main":
+        sys.exit(f"{e['name']}: ref must be 'main', not {e.get('ref')!r}")
     variants = e.get("variants")
     if variants is None:
         continue
