@@ -12,8 +12,8 @@ install: |
   uv venv
   # One command, so scout's inspect-ai requirement resolves to the git inspect_ai.
   uv pip install --exclude-newer false \
-    git+https://github.com/UKGovernmentBEIS/inspect_ai.git \
-    git+https://github.com/meridianlabs-ai/inspect_scout.git
+    git+https://github.com/UKGovernmentBEIS/inspect_ai.git@main \
+    git+https://github.com/meridianlabs-ai/inspect_scout.git@main
   uv pip install --exclude-newer false -e ".[dev]"
 test: |
   # Every check runs; the step fails if any did.

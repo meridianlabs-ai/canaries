@@ -17,9 +17,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 import unittest
 
 CANARIES = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "canaries")
+PLAN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plan.py")
 
 # A type checker (mypy, pyright, tsc) or an eslint call. `pnpm lint`,
 # `pnpm compile-tests` and `yarn typecheck` wrap eslint or tsc.
@@ -38,6 +41,21 @@ def load(path):
         raise unittest.SkipTest("needs yq or PyYAML to read the canary")
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+def plan(entries):
+    """Run scripts/plan.py over `entries` (one JSON object per line) and return the
+    completed process. plan.py validates every entry at import, before it selects
+    any, so a clean environment (no ONLY, SCHEDULE or CHANGED_FILES) selects them
+    all; a rejected entry exits non-zero with its message on stderr."""
+    env = {k: v for k, v in os.environ.items() if k not in {"ONLY", "SCHEDULE", "CHANGED_FILES"}}
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+        f.write("\n".join(json.dumps(e) for e in entries))
+        path = f.name
+    try:
+        return subprocess.run([sys.executable, PLAN, path], capture_output=True, text=True, env=env)
+    finally:
+        os.unlink(path)
 
 
 def scrubbed(text):
@@ -149,6 +167,74 @@ class RunsStaticAnalysis(unittest.TestCase):
         self.assertFalse(runs_static_analysis({"test": "uv run --no-sync pytest -ra", "static-analysis-exempt": True}))
 
 
+class TargetRef(unittest.TestCase):
+    # A canary must check out `main`, never a target repository's default branch.
+    def test_non_main_ref_fails(self):
+        result = plan([{"name": "x", "repo": "o/r", "ref": "meridian"}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ref must be", result.stderr)
+
+    def test_missing_ref_fails(self):
+        result = plan([{"name": "x", "repo": "o/r"}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ref must be", result.stderr)
+
+    def test_main_ref_passes(self):
+        result = plan([{"name": "x", "repo": "o/r", "ref": "main"}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class InstallGitUrls(unittest.TestCase):
+    # Every git+ URL in an install script must pin @main, so a canary can't drift
+    # onto a dependency's default branch.
+    BASE = {"name": "x", "repo": "o/r", "ref": "main"}
+
+    def test_unpinned_git_url_fails(self):
+        result = plan([{**self.BASE, "install": "uv pip install git+https://github.com/o/r.git"}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("@main", result.stderr)
+
+    def test_git_url_pinned_to_another_ref_fails(self):
+        result = plan([{**self.BASE, "install": "uv pip install git+https://github.com/o/r.git@meridian"}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("@main", result.stderr)
+
+    def test_git_url_pinned_to_main_passes(self):
+        result = plan([{**self.BASE, "install": "uv pip install git+https://github.com/o/r.git@main"}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_quoted_git_url_pinned_to_main_passes(self):
+        result = plan([{**self.BASE, "install": 'uv pip install "git+https://github.com/o/r.git@main"'}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_git_url_with_ref_before_fragment_fails(self):
+        result = plan([{**self.BASE, "install": "uv pip install git+https://github.com/o/r.git@dev#subdirectory=pkg@main"}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("@main", result.stderr)
+
+    def test_install_without_a_git_url_passes(self):
+        result = plan([{**self.BASE, "install": "uv pip install -e .[dev]"}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unpinned_git_url_in_a_variant_fails(self):
+        result = plan([{**self.BASE, "variants": [{"label": "a", "install": "pip install git+https://github.com/o/r.git"}]}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("@main", result.stderr)
+
+    def test_git_url_followed_by_a_shell_separator_passes(self):
+        result = plan([{**self.BASE, "install": "pip install git+https://github.com/o/r.git@main; echo done"}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_git_url_followed_by_a_redirect_passes(self):
+        result = plan([{**self.BASE, "install": "pip install git+https://github.com/o/r.git@main>/dev/null"}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_git_url_pinned_to_a_main_prefixed_ref_fails(self):
+        result = plan([{**self.BASE, "install": "pip install git+https://github.com/o/r.git@main-old"}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("@main", result.stderr)
+
+
 class RealCanaries(unittest.TestCase):
     def test_every_canary_runs_static_analysis(self):
         paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
@@ -160,6 +246,14 @@ class RealCanaries(unittest.TestCase):
                     runs_static_analysis(load(path)),
                     f"{name} runs no type checker or eslint and is not static-analysis-exempt",
                 )
+
+    def test_every_canary_passes_the_planner(self):
+        # Runs plan.py over the real files, so a wrong ref (or an unpinned git+
+        # install URL) in any canary fails CI.
+        paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
+        self.assertTrue(paths, "no canaries found")
+        result = plan([load(path) for path in paths])
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

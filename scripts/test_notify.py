@@ -441,7 +441,7 @@ class Planner(unittest.TestCase):
     def plan(self, names):
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
             for name in names:
-                f.write(json.dumps({"name": name, "repo": f"o/{name}", "cadence": "2h"}) + "\n")
+                f.write(json.dumps({"name": name, "repo": f"o/{name}", "ref": "main", "cadence": "2h"}) + "\n")
         try:
             script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plan.py")
             return subprocess.run([sys.executable, script, f.name], capture_output=True, text=True, env={})
@@ -468,6 +468,7 @@ class Planner(unittest.TestCase):
     VARIANTS = {
         "name": "inspect_ai",
         "repo": "UKGovernmentBEIS/inspect_ai",
+        "ref": "main",
         "cadence": "2h",
         "python": "3.11",
         "timeout-minutes": 60,
@@ -480,7 +481,7 @@ class Planner(unittest.TestCase):
     }
 
     def test_variants_expand_into_parallel_jobs(self):
-        plain_entry = {"name": "inspect_swe", "repo": "meridianlabs-ai/inspect_swe", "cadence": "2h", "test": "pytest"}
+        plain_entry = {"name": "inspect_swe", "repo": "meridianlabs-ai/inspect_swe", "ref": "main", "cadence": "2h", "test": "pytest"}
         include = self.matrix([self.VARIANTS, plain_entry])
         self.assertEqual([e["name"] for e in include], ["inspect_ai (asyncio)", "inspect_ai (docs)", "inspect_swe"])
         self.assertEqual([e["canary"] for e in include], ["inspect_ai", "inspect_ai", "inspect_swe"])
@@ -493,7 +494,7 @@ class Planner(unittest.TestCase):
         self.assertEqual(swe["name"], "inspect_swe")
 
     def test_only_and_pull_requests_run_every_variant(self):
-        other = {"name": "inspect_swe", "repo": "meridianlabs-ai/inspect_swe", "cadence": "nightly"}
+        other = {"name": "inspect_swe", "repo": "meridianlabs-ai/inspect_swe", "ref": "main", "cadence": "nightly"}
         names = lambda include: [e["name"] for e in include]
         self.assertEqual(names(self.matrix([self.VARIANTS, other], ONLY="inspect_ai")), ["inspect_ai (asyncio)", "inspect_ai (docs)"])
         self.assertEqual(names(self.matrix([self.VARIANTS, other], CHANGED_FILES="canaries/inspect_ai.yml")), ["inspect_ai (asyncio)", "inspect_ai (docs)"])
@@ -528,7 +529,7 @@ class Planner(unittest.TestCase):
         self.assertEqual([e["name"] for e in self.matrix([{**self.VARIANTS, "variants": [{"label": "1"}, {"label": "2"}]}])], ["inspect_ai (1)", "inspect_ai (2)"])
 
     def test_every_generated_job_name_parses_back(self):
-        include = self.matrix([self.VARIANTS, {"name": "a.b-c_1", "repo": "o/r", "cadence": "2h"}])
+        include = self.matrix([self.VARIANTS, {"name": "a.b-c_1", "repo": "o/r", "ref": "main", "cadence": "2h"}])
         for entry in include:
             self.assertEqual(notify.canary_and_part(entry["name"]), (entry["canary"], entry.get("label")))
         # The same label in two canaries is fine.
@@ -922,7 +923,7 @@ class Recheck(unittest.TestCase):
     NIGHTLY = "30 5 * * *"
 
     def entry(self, name, cadence, variants=None):
-        entry = {"name": name, "repo": f"o/{name}", "cadence": cadence, "test": "pytest"}
+        entry = {"name": name, "repo": f"o/{name}", "ref": "main", "cadence": cadence, "test": "pytest"}
         return entry | ({"variants": [{"label": label} for label in variants]} if variants else {})
 
     def planned(self, entries, runs, schedule=TWO_HOURS, **env):
