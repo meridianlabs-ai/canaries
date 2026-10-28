@@ -6,8 +6,13 @@ Slack secrets are used only by the notify job, through the `slack` environment
 (restricted to main in the repository settings), and that job runs only this
 repository's own code. These tests fail if a workflow change breaks any of it.
 
-Org-level secrets can't be checked from here: a repository's token can't list
-them. They are scoped away from this repository in the org settings.
+A repository's token cannot list organization secrets. Instead `secrets.yml`
+checks the `secrets` context by name each day, on pushes to `main`, and on
+pull requests. On Dependabot pull request runs, the context holds Dependabot
+secrets in place of Actions secrets. So those runs fail on any Dependabot secret
+visible to this repository. Fork pull request runs get only `github_token`, so
+they prove nothing. Codespaces and Copilot agent organization secrets are not
+covered: they do not reach Actions runs.
 """
 
 import json
@@ -115,6 +120,53 @@ class CanaryWorkflow(unittest.TestCase):
             # No third-party actions other than checking out this repository.
             self.assertIn(uses(step), {"", "actions/checkout"})
             self.assertNotIn("artifact", text(step))
+
+
+class SecretsWorkflow(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = load("secrets.yml")
+        cls.jobs = cls.workflow["jobs"]
+        # `yq` keeps `on` a string; PyYAML reads it as the boolean True.
+        cls.on = cls.workflow.get("on", cls.workflow.get(True))
+
+    def test_one_job_named_no_secrets(self):
+        self.assertEqual(set(self.jobs), {"no-secrets"})
+
+    def test_no_top_level_permissions(self):
+        self.assertEqual(self.workflow["permissions"], {})
+
+    def test_the_job_grants_nothing(self):
+        job = self.jobs["no-secrets"]
+        self.assertNotIn("environment", job)
+        self.assertEqual(job.get("permissions", {}), {})
+
+    def test_the_only_secrets_reference_is_tojson_in_one_step_env(self):
+        # The top level names no secret; one step reads the whole context. The
+        # workflow's own `name` is the word `secrets`, so skip it here.
+        top = {k: v for k, v in self.workflow.items() if k not in ("jobs", "name")}
+        self.assertFalse(SECRETS.search(text(top)))
+        with_secrets = [s for s in self.jobs["no-secrets"]["steps"] if SECRETS.search(text(s))]
+        self.assertEqual(len(with_secrets), 1)
+        env = with_secrets[0]["env"]
+        self.assertEqual([v for v in env.values() if SECRETS.search(v)], ["${{ toJSON(secrets) }}"])
+
+    def test_the_only_action_is_checkout_without_credentials(self):
+        for step in self.jobs["no-secrets"]["steps"]:
+            self.assertIn(uses(step), {"", "actions/checkout"})
+            if uses(step) == "actions/checkout":
+                self.assertIs((step.get("with") or {}).get("persist-credentials"), False)
+
+    def test_runner_is_github_hosted(self):
+        self.assertNotIn("self-hosted", str(self.jobs["no-secrets"]["runs-on"]))
+
+    def test_it_runs_on_every_schedule_push_and_pull_request(self):
+        self.assertIn("schedule", self.on)
+        self.assertEqual(self.on["push"], {"branches": ["main"]})
+        self.assertIn("workflow_dispatch", self.on)
+        # A required check must report on every PR, so no `paths` filter.
+        self.assertIn("pull_request", self.on)
+        self.assertNotIn("paths", self.on["pull_request"] or {})
 
 
 class TestWorkflow(unittest.TestCase):
