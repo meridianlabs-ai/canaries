@@ -54,15 +54,17 @@ ref: main                   # must be main
 cadence: 2h                 # 2h or nightly
 python: "3.11"
 timeout-minutes: 60
-install: |                  # newest releases of everything, ignoring any cooldown
+install: |                  # newest releases of everything; see below
   uv venv
-  uv pip install --exclude-newer false -e ".[dev]"
+  uv pip install --no-config --exclude-newer false -e ".[dev]"
 test: |                     # every static analysis tool CI runs, plus the tests
   status=0                  # each check runs; the step fails if any did
   echo "::group::pytest"; uv run --no-sync pytest -ra -n logical || status=1; echo "::endgroup::"
   echo "::group::mypy"; uv run --no-sync mypy src tests || status=1; echo "::endgroup::"
   exit $status
 ```
+
+`--exclude-newer false` clears the global cooldown. A repository with a `[tool.uv.exclude-newer-package]` table also needs `--no-config`, which makes uv ignore the repository's uv settings.
 
 Optional fields: `runs-on` (a runner label; default `ubuntu-latest`), `node` (a Node.js version to set up before installing), and `static-analysis-exempt` (a reason string, for a canary whose repository has no type checker or eslint to run; a top-level field, not allowed in a variant). Set environment variables inside `install` or `test` with `export`.
 
