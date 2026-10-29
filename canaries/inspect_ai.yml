@@ -17,11 +17,13 @@ cadence: 2h
 python: "3.11"
 timeout-minutes: 60
 # The slow suite's environment, for asyncio and trio.
+# Each install also passes --no-config: --exclude-newer false alone keeps the
+# per-package cooldowns in the repo's [tool.uv.exclude-newer-package].
 install: |
   uv venv
-  uv pip install --exclude-newer false -e ".[dev]" pytest-timeout
+  uv pip install --no-config --exclude-newer false -e ".[dev]" pytest-timeout
   # Pre-installed so ensure_test_package_installed() doesn't install it mid-run.
-  uv pip install --exclude-newer false --no-deps ./tests/test_package
+  uv pip install --no-config --exclude-newer false --no-deps ./tests/test_package
 variants:
   - label: asyncio
     test: |
@@ -46,13 +48,13 @@ variants:
     timeout-minutes: 15
     install: |
       uv venv
-      uv pip install --exclude-newer false "./src/inspect_sandbox_tools[dev]"
+      uv pip install --no-config --exclude-newer false "./src/inspect_sandbox_tools[dev]"
     test: |
       uv run --no-sync pytest src/inspect_sandbox_tools/tests/ -ra
   - label: docs
     timeout-minutes: 30
     install: |
       uv venv
-      uv pip install --exclude-newer false -r requirements-doc.txt .
+      uv pip install --no-config --exclude-newer false -r requirements-doc.txt .
     test: |
       uv run --no-sync quarto render docs
