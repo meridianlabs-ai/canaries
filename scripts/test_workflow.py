@@ -93,6 +93,23 @@ class CanaryWorkflow(unittest.TestCase):
         for step in self.jobs["canary"]["steps"]:
             self.assertNotIn(uses(step), {"actions/upload-artifact", "actions/cache/save"})
 
+    def test_the_test_step_writes_a_junit_report(self):
+        test = next(s for s in self.jobs["canary"]["steps"] if s.get("name") == "Test")
+        env = test.get("env") or {}
+        self.assertIn("--junitxml=", env.get("PYTEST_ADDOPTS", ""))
+        self.assertIn("CANARY_JUNIT_NAME", env)
+
+    def test_the_failed_tests_step_reads_the_reports_safely(self):
+        # Right after Test, an inline script with no secrets, no action and no artifact.
+        names = [s.get("name") for s in self.jobs["canary"]["steps"]]
+        self.assertEqual(names.index("Failed tests"), names.index("Test") + 1)
+        failed = next(s for s in self.jobs["canary"]["steps"] if s.get("name") == "Failed tests")
+        self.assertEqual(failed["if"], "${{ !cancelled() }}")
+        self.assertEqual(uses(failed), "")  # no `uses:`; the script runs inline
+        self.assertFalse(SECRETS.search(text(failed)))
+        self.assertNotIn("artifact", text(failed))
+        self.assertIn("python3 -I", failed["run"])  # isolated: the checkout is untrusted
+
     def test_checkouts_keep_no_credentials(self):
         for name, job in self.jobs.items():
             for step in job["steps"]:

@@ -127,13 +127,50 @@ jobs:
           uv pip list --format freeze | sed -e 's/==/ /' -e 's/^/canary-installed: /'
 
       - name: Test
+        env:
+          # pytest expands $CANARY_JUNIT_NAME when it reads this; a part that
+          # runs pytest more than once sets a different name for each run.
+          PYTEST_ADDOPTS: --junitxml=${{ runner.temp }}/junit/$CANARY_JUNIT_NAME.xml
+          CANARY_JUNIT_NAME: pytest
         run: ${{ matrix.test }}
+
+      # One `canary-failed: <id>` line per failed test in the JUnit reports,
+      # which scripts/notify.py compares between runs to post only when the
+      # failures change. Standard library only, isolated (-I) because the
+      # working directory is the tested checkout. It never fails the job, so a
+      # green Test stays green.
+      - name: Failed tests
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -I - <<'PY'
+          import glob, os, xml.etree.ElementTree as ET
+
+          junit = os.path.join(os.environ["RUNNER_TEMP"], "junit")
+          for path in sorted(glob.glob(os.path.join(junit, "*.xml"))):
+              name = os.path.basename(path)
+              try:
+                  root = ET.parse(path).getroot()
+                  failed = []
+                  total = 0
+                  for case in root.iter("testcase"):
+                      total += 1
+                      if case.find("failure") is not None or case.find("error") is not None:
+                          classname = case.get("classname") or ""
+                          testname = case.get("name") or ""
+                          failed.append(f"{classname}::{testname}" if classname else testname)
+                  print(f"canary-junit: {name} {total} {len(failed)}")
+                  for test in failed:
+                      print(f"canary-failed: {test}")
+              except Exception:
+                  print(f"canary-junit: {name} unreadable")
+          PY
 
   # The only job with secrets. It checks out this repository (no
   # credentials persisted) to run scripts/notify.py, which uses only the
   # Python standard library. It reads job results and logs through the API
   # and treats log text as untrusted: escaped, truncated and posted only in
-  # code blocks under a label. Alerts only when a canary changes state.
+  # code blocks under a label. Alerts when a canary turns red, when its failed
+  # tests change, and when it recovers.
   notify:
     needs: [plan, canary]
     if: ${{ always() && (inputs.test_slack || inputs.repost_run || github.event_name == 'schedule') }}
@@ -147,7 +184,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Post state changes to Slack
+      - name: Post red results and recoveries to Slack
         env:
           SLACK_BOT_TOKEN: ${{ secrets.CANARY_SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ vars.CANARY_SLACK_CHANNEL_ID }}

@@ -27,6 +27,7 @@ test: |
   test -n "$supported" && test -n "$newest"
   for version in $(printf '%s\n' $supported "$newest" | sort -uV); do
     echo "::group::LiteLLM $version"
+    export CANARY_JUNIT_NAME=litellm-$version
     make test-litellm LITELLM="$version" || status=1
     make check-litellm LITELLM="$version" || status=1
     echo "::endgroup::"

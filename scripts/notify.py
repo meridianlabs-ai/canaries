@@ -1,24 +1,36 @@
-"""Post canary state changes to Slack.
+"""Post canary red results and recoveries to Slack.
 
 Runs in the workflow's notify job after a scheduled run. A canary with
 variants runs as several jobs named `<canary> (<label>)`, its parts; it is
 red if any part is red and green if every part that ran is green. Each
-canary's state is compared with its state in the most recent earlier
-scheduled run that ran it; a message goes out only when a canary turns red or
-recovers. Standard library only.
+canary's state and failed tests are compared with the most recent earlier
+scheduled run that ran it. A message goes out when a canary turns red, when
+the set of its failed tests changes, and when it recovers. A canary that
+stays red with the same failures gets no new message; the last red post is
+edited to count the repeats. Standard library only.
+
+A red part's failed tests come from the `canary-failed:` lines its job writes
+from the pytest JUnit report. The failure set of a canary is the (part,
+test id) pairs of its red parts; a red part with no ids counts as one "red,
+no test ids" item. notify keeps its state in its own job log: one
+`canary-notify: <canary> <state> <hash> <count> <ts>` line per canary, which
+the next run reads to compare failure sets and to count the repeats.
 
 With CANARY_SLACK_BOT_TOKEN and CANARY_SLACK_CHANNEL_ID, each red alert gets
 a threaded reply with, for each failing part, the failed tests, the end of
 its log and the package versions that changed since that part last passed.
-Otherwise the message goes to CANARY_SLACK_WEBHOOK_URL on its own. The canary
-job marks the lines this reads (`canary-tested:`, `canary-installed:`), so
-each log is read as a whole, never split into steps.
+Otherwise the message goes to CANARY_SLACK_WEBHOOK_URL on its own, with no
+repeat count. The canary job marks the lines this reads (`canary-tested:`,
+`canary-installed:`, `canary-failed:`), so each log is read as a whole,
+never split into steps.
 
 Job logs come from runs that installed unreviewed packages, so their text is
 treated as untrusted: it is stripped of control characters, truncated,
-escaped for Slack and posted only inside code blocks under a label.
+escaped for Slack and posted only inside code blocks under a label. Test ids
+are only hashed and compared, never posted.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -26,6 +38,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import namedtuple
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 RED = {"failure", "timed_out"}
 GREEN = {"success"}
@@ -50,6 +65,10 @@ REPLY_CHARS = 12000  # the whole threaded reply, after escaping; Slack truncates
 UNTRUSTED = "Untrusted log output from a run that installed unreviewed packages."
 TESTED_MARKER = "canary-tested: "
 INSTALLED_MARKER = "canary-installed: "
+FAILED_MARKER = "canary-failed: "
+NOTIFY_MARKER = "canary-notify: "
+NO_TEST_IDS = "red, no test ids"
+TIMEZONE = ZoneInfo("America/New_York")
 
 TIMESTAMP = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.\d+)?Z ?")
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
@@ -60,6 +79,8 @@ INSTALLED = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*) (\S+)$")
 # The job names scripts/plan.py generates: `<canary>` or `<canary> (<label>)`,
 # both parts matching its NAME pattern.
 JOB_NAME = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)(?: \(([A-Za-z0-9][A-Za-z0-9._-]*)\))?")
+# A `canary-notify:` state line this script writes and its next run reads.
+RECORD = re.compile(r"canary-notify: ([A-Za-z0-9][A-Za-z0-9._-]*) (red|green) (-|[0-9a-f]{64}) (\d+) (-|\d+\.\d+)")
 
 
 # --- state ------------------------------------------------------------------
@@ -120,25 +141,26 @@ def canary_state(jobs):
     return "red" if "red" in states else "green" if states else None
 
 
+def previous_run(canary, history):
+    """The jobs of the newest run in `history` that ran any part of `canary`.
+
+    `history` is an iterable of job lists, newest run first; None if none ran
+    it. The record of the canary's last result and its last state both come
+    from this run.
+    """
+    for jobs in history:
+        if canary_state(by_canary(jobs).get(canary, [])):
+            return jobs
+    return None
+
+
 def previous_state(canary, history):
     """The canary's state in the newest run of `history` that ran any part of it.
 
     `history` is an iterable of job lists, newest run first; None if none ran it.
     """
-    for jobs in history:
-        if found := canary_state(by_canary(jobs).get(canary, [])):
-            return found
-    return None
-
-
-def changed(now, before):
-    """Whether a canary's state `now` differs from `before` (None: never ran before).
-
-    A canary with no earlier result in the searched history is new and
-    counts as previously green, so it alerts on its first failure and stays
-    quiet while it passes.
-    """
-    return now != (before or "green")
+    jobs = previous_run(canary, history)
+    return canary_state(by_canary(jobs).get(canary, [])) if jobs else None
 
 
 # --- log text ---------------------------------------------------------------
@@ -277,6 +299,77 @@ def failing_step(job):
             if step.get("conclusion") == want:
                 return step
     return None
+
+
+# --- failure set and state record -------------------------------------------
+
+
+Record = namedtuple("Record", "canary state hash count ts")
+
+
+def failed_ids(log):
+    """Unique `canary-failed:` ids from a log, in order (cleaned lines)."""
+    ids = []
+    for line in log.splitlines():
+        text = clean(line)
+        if text.startswith(FAILED_MARKER):
+            id = text[len(FAILED_MARKER) :].strip()
+            if id and id not in ids:
+                ids.append(id)
+    return ids
+
+
+def failure_set(parts, read_log):
+    """A canary's failure set as {(label, id)}, or None if a red part's log
+    can't be read.
+
+    `read_log(job)` returns a job's log text, or None when it can't be read.
+    label is a part's label, "" for a canary without parts. A red part with
+    no `canary-failed:` id contributes one (label, "red, no test ids") item.
+    """
+    items = set()
+    for job in parts:
+        if state(job["conclusion"]) != "red":
+            continue
+        log = read_log(job)
+        if log is None:
+            return None
+        label = canary_and_part(job["name"])[1] or ""
+        ids = failed_ids(log)
+        items |= {(label, id) for id in ids} if ids else {(label, NO_TEST_IDS)}
+    return items
+
+
+def set_hash(items):
+    """sha256 hex of a failure set, or '-' when it is None (unknown)."""
+    if items is None:
+        return "-"
+    text = "\n".join(sorted(f"{label}\t{id}" for label, id in items))
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def record_line(record):
+    """The `canary-notify:` log line for one canary's result this run."""
+    return f"{NOTIFY_MARKER}{record.canary} {record.state} {record.hash} {record.count} {record.ts}"
+
+
+def records(log):
+    """{canary: Record} from a notify job's log; malformed lines are ignored."""
+    found = {}
+    for line in log.splitlines():
+        match = RECORD.fullmatch(clean(line))
+        if match:
+            canary, result, hash, count, ts = match.groups()
+            found[canary] = Record(canary, result, hash, int(count), ts)
+    return found
+
+
+def repeat_line(count, run):
+    """The line added to a repeated red post: the count and the run's time."""
+    stamp = run.get("run_started_at") or run["created_at"]
+    when = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(TIMEZONE)
+    plural = "" if count == 1 else "s"
+    return f"Same failures in {count} more run{plural}, last at {when:%b %-d, %-I:%M %p} ET"
 
 
 # --- messages ---------------------------------------------------------------
@@ -525,6 +618,25 @@ class Slack:
             return None
         return response["ts"]
 
+    def update(self, ts, text):
+        """Edit the message at `ts` (chat.update); a no-op on the webhook path.
+
+        On failure it warns and returns: the alert is already posted, so the
+        edit just carries the repeat count, which the next run tries again.
+        """
+        if not self.threads:
+            return
+        body = {"channel": self.channel, "ts": ts, "text": text, "link_names": False, "unfurl_links": False, "unfurl_media": False}
+        response = json.loads(
+            request(
+                "https://slack.com/api/chat.update",
+                json.dumps(body).encode(),
+                {"Content-Type": "application/json; charset=utf-8", "Authorization": f"Bearer {self.bot_token}"},
+            )
+        )
+        if not response.get("ok"):
+            print(f"::warning::chat.update failed: {response.get('error')}")
+
 
 def job_url(server, repo, job):
     return f"{server}/{repo}/actions/runs/{job['run_id']}/job/{job['id']}"
@@ -567,39 +679,39 @@ def main():
         print("Planning failed.")
         slack.post(planning_failed_text(job_url(server, repo, plan)))
         return
-    logs = {}
+    read = {}  # job id -> log text, or None when it couldn't be read
+
+    def read_log(job):
+        if job["id"] not in read:
+            try:
+                read[job["id"]] = github.log(job["id"])
+            except Exception as e:  # still alert, without the commit and details
+                read[job["id"]] = None
+                print(f"::warning::log for {job['name']}: {e!r}")
+        return read[job["id"]]
 
     def log(job):
-        if job["id"] not in logs:
-            try:
-                logs[job["id"]] = github.log(job["id"])
-            except Exception as e:  # still alert, without the commit and details
-                logs[job["id"]] = ""
-                print(f"::warning::log for {job['name']}: {e!r}")
-        return logs[job["id"]]
+        return read_log(job) or ""
 
-    for name, parts in by_canary(jobs).items():
-        now = canary_state(parts)
-        if now is None:
-            continue
-        if repost:
-            if now != "red":
-                continue
-        elif not changed(now, previous_state(name, github.history(run))):
-            print(f"{name}: still {now}")
-            continue
-        red = now == "red"
-        print(f"{name}: now {now}")
+    def current_alert(name, parts, red):
+        """The channel message for a canary's result this run."""
         ran = [j for j in parts if state(j["conclusion"])]
         failing = [j for j in ran if state(j["conclusion"]) == "red"]
         first = (failing or ran)[0]
         # A canary with parts links the run, which lists them all.
-        canary_run = f"{server}/{repo}/actions/runs/{first['run_id']}"
-        url = job_url(server, repo, first) if len(parts) == 1 else canary_run
+        url = job_url(server, repo, first) if len(parts) == 1 else f"{server}/{repo}/actions/runs/{first['run_id']}"
         labels = [label for label in (canary_and_part(j["name"])[1] for j in failing) if label]
-        ts = slack.post(alert_text(name, red, url, tested_commit(log(first)), labels))
+        return alert_text(name, red, url, tested_commit(log(first)), labels)
+
+    def announce(name, parts, red):
+        """Post the alert, and for a red canary its threaded reply. Returns
+        the channel message ts, or None on the webhook path."""
+        ts = slack.post(current_alert(name, parts, red))
         if not (red and ts):
-            continue
+            return ts
+        ran = [j for j in parts if state(j["conclusion"])]
+        failing = [j for j in ran if state(j["conclusion"]) == "red"]
+        canary_run = f"{server}/{repo}/actions/runs/{failing[0]['run_id']}"
         try:
             details = []
             for i, job in enumerate(failing):
@@ -615,6 +727,63 @@ def main():
             reply = f"Couldn't collect the failure details: {slack_escape(type(e).__name__)}. See the run log."
             print(f"::warning::details for {name}: {e!r}")
         slack.post(reply, thread_ts=ts)
+        return ts
+
+    def read_record(name, jobs):
+        """The canary's record from its last run's notify job, or None if it
+        can't be read (no completed notify job, read error, or no line)."""
+        notify_job = next((j for j in jobs if j["name"] == "notify"), None)
+        if not notify_job or notify_job["conclusion"] is None:
+            print(f"::warning::{name}: its last run has no completed notify job")
+            return None
+        log = read_log(notify_job)  # warns on a read error
+        if log is None:
+            return None
+        record = records(log).get(name)
+        if record is None:
+            print(f"::warning::{name}: no record in its last notify log")
+        return record
+
+    for name, parts in by_canary(jobs).items():
+        now = canary_state(parts)
+        if now is None:
+            continue
+        if repost:
+            if now == "red":
+                print(f"{name}: now red")
+                announce(name, parts, True)
+            continue
+
+        try:
+            previous = previous_run(name, github.history(run))
+        except Exception as e:  # unknown history: red posts, green doesn't
+            print(f"::warning::history for {name}: {e!r}")
+            previous = None
+        before = canary_state(by_canary(previous).get(name, [])) if previous else None
+
+        if now == "green":
+            if before == "red":
+                print(f"{name}: now green")
+                announce(name, parts, False)
+            else:
+                print(f"{name}: still green")
+            print(record_line(Record(name, "green", "-", 0, "-")))
+            continue
+
+        hash = set_hash(failure_set(parts, read_log))
+        if before == "red":
+            record = read_record(name, previous)
+            if record and record.state == "red" and record.hash != "-" and record.hash == hash:
+                count = record.count + 1
+                print(f"{name}: still red, same failures (x{count})")
+                if record.ts != "-":  # the webhook path left no message to edit
+                    slack.update(record.ts, f"{current_alert(name, parts, True)}\n{repeat_line(count, run)}")
+                print(record_line(Record(name, "red", hash, count, record.ts)))
+                continue
+
+        print(f"{name}: now red")
+        ts = announce(name, parts, True)
+        print(record_line(Record(name, "red", hash, 0, ts or "-")))
 
 
 if __name__ == "__main__":
