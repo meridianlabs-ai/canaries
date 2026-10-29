@@ -1007,6 +1007,25 @@ class Main(unittest.TestCase):
         self.assertEqual(self.records()["a"].count, 0)
         self.assertEqual(self.records()["a"].hash, notify.set_hash({("", "t1")}))
 
+    def test_long_ids_with_a_shared_prefix_stay_distinct(self):
+        """Review R2: two ids that share their first 300+ characters must not
+        hash the same. Last run recorded one, this run has the other, so a new
+        alert goes out, not a quiet edit. The previous record comes from the
+        same code, so a truncated id would make this run look unchanged."""
+        prefix = "pkg/test_long.py::test_" + "x" * 320  # longer than LINE_CHARS
+        for old_id, new_id in (("a", "b"), ("b", "a")):
+            with self.subTest(change=f"{old_id}->{new_id}"):
+                before = {
+                    100: [job("a", "failure", id=12, run_id=100)],
+                    99: [job("a", "success", id=22, run_id=99)],
+                }
+                self.run_main(before, self.BOT, {12: canary_log(test_output=[f"canary-failed: {prefix}{old_id}"])})
+                record = notify.record_line(self.records()["a"])
+                posts = self.red_again([prefix + new_id], record, self.BOT)
+                self.assertEqual(len(posts), 2)  # a fresh alert and its reply, not an edit
+                self.assertEqual(posts[0][0], "https://slack.com/api/chat.postMessage")
+                self.assertFalse(any(url.endswith("chat.update") for url, _ in posts))
+
     def test_a_failing_update_still_records_and_handles_the_next_canary(self):
         # a stays red with the same failures, so notify edits its last post; the
         # edit fails to reach Slack. a's record still carries count+1 and the old

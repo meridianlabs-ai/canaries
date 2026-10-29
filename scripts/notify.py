@@ -201,11 +201,13 @@ def plain(name, limit=NAME_CHARS):
     return f"`{cut(name, limit)}`"
 
 
-def clean(line):
-    """A log line without its timestamp, colors, control characters or excess length."""
+def clean(line, limit=LINE_CHARS):
+    """A log line without its timestamp, colors, control characters, and length
+    over `limit`. A caller that compares ids passes `limit=None` to keep the
+    full text."""
     line = CONTROL.sub("", ANSI.sub("", TIMESTAMP.sub("", line, count=1)))
-    if len(line) > LINE_CHARS:
-        line = line[: LINE_CHARS - 1] + "…"
+    if limit is not None and len(line) > limit:
+        line = line[: limit - 1] + "…"
     return line
 
 
@@ -318,7 +320,7 @@ def failed_ids(log):
     """Unique `canary-failed:` ids from a log, in order (cleaned lines)."""
     ids = []
     for line in log.splitlines():
-        text = clean(line)
+        text = clean(line, limit=None)
         if text.startswith(FAILED_MARKER):
             test_id = text[len(FAILED_MARKER) :].strip()
             if test_id and test_id not in ids:
