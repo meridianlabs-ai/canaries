@@ -639,12 +639,12 @@ class FakeServices:
         self.raise_on = None  # a substring of a GET url that should fail
 
     def __call__(self, url, data=None, headers=None, opener=None, read=None):
+        if self.raise_on and self.raise_on in url:  # a GET or a Slack post that fails to reach its server
+            raise notify.urllib.error.URLError("boom")
         if data is not None:
             body = json.loads(data)
             self.posts.append((url, body))
             return json.dumps({"ok": True, "ts": f"{len(self.posts)}.0"})
-        if self.raise_on and self.raise_on in url:
-            raise notify.urllib.error.URLError("boom")
         parts = urlsplit(url)
         path, query = parts.path.split("/repos/o/r/", 1)[1], parse_qs(parts.query)
         if path.startswith("actions/runs/") and path.endswith("/jobs"):
@@ -1006,6 +1006,36 @@ class Main(unittest.TestCase):
         self.assertEqual(len(posts), 2)
         self.assertEqual(self.records()["a"].count, 0)
         self.assertEqual(self.records()["a"].hash, notify.set_hash({("", "t1")}))
+
+    def test_a_failing_update_still_records_and_handles_the_next_canary(self):
+        # a stays red with the same failures, so notify edits its last post; the
+        # edit fails to reach Slack. a's record still carries count+1 and the old
+        # ts, and b, the next canary in the same run, is still handled.
+        logs = {}
+        runs = {
+            100: [job("a", "failure", id=12, run_id=100), job("b", "failure", id=13, run_id=100)],
+            99: [job("a", "failure", id=22, run_id=99), job("b", "success", id=23, run_id=99), notified(99, red_record("a", count=2, ts="1700000000.5"), logs, 29)],
+        }
+        fake = FakeServices(runs)
+        fake.logs = logs
+        fake.raise_on = "chat.update"
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {**ENV, **self.BOT}, clear=True), mock.patch.object(notify, "request", fake), mock.patch.object(notify.time, "sleep"), contextlib.redirect_stdout(out):
+            notify.main()
+        self.output = out.getvalue()
+        self.assertIn("::warning::chat.update failed:", self.output)
+        self.assertEqual(self.records()["a"], notify.Record("a", "red", notify.set_hash({("", notify.NO_TEST_IDS)}), 3, "1700000000.5"))
+        self.assertTrue(any("Canary `b` is failing" in body.get("text", "") for _, body in fake.posts))
+        self.assertEqual(self.records()["b"].count, 0)
+
+    def test_a_recovery_posts_without_a_readable_record(self):
+        # Red last run by its job results, now green, but that run has no notify
+        # job, so no record. The recovery still posts once.
+        runs = {100: [job("a", "success", run_id=100)], 99: [job("a", "failure", run_id=99)]}
+        posts = self.run_main(runs, self.WEBHOOK)
+        self.assertEqual(len(posts), 1)
+        self.assertIn("Canary `a` recovered", posts[0][1]["text"])
+        self.assertEqual(self.records()["a"].state, "green")
 
     def test_an_unreadable_record_posts_the_red_results(self):
         # Red last run too, but that run has no completed notify job: post, with a warning.

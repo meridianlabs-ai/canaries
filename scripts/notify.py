@@ -16,6 +16,13 @@ no test ids" item. notify keeps its state in its own job log: one
 `canary-notify: <canary> <state> <hash> <count> <ts>` line per canary, which
 the next run reads to compare failure sets and to count the repeats.
 
+A canary's previous state, red or green, comes from the earlier runs' job
+results. The `canary-notify:` record only compares a red canary's failed
+tests and carries the count and the time. So a canary that recovers posts
+even when its record cannot be read. If notify cannot read the earlier runs,
+it posts a red canary's results and no recovery. If it cannot read its last
+record, a red canary posts again.
+
 With CANARY_SLACK_BOT_TOKEN and CANARY_SLACK_CHANNEL_ID, each red alert gets
 a threaded reply with, for each failing part, the failed tests, the end of
 its log and the package versions that changed since that part last passed.
@@ -313,9 +320,9 @@ def failed_ids(log):
     for line in log.splitlines():
         text = clean(line)
         if text.startswith(FAILED_MARKER):
-            id = text[len(FAILED_MARKER) :].strip()
-            if id and id not in ids:
-                ids.append(id)
+            test_id = text[len(FAILED_MARKER) :].strip()
+            if test_id and test_id not in ids:
+                ids.append(test_id)
     return ids
 
 
@@ -336,7 +343,7 @@ def failure_set(parts, read_log):
             return None
         label = canary_and_part(job["name"])[1] or ""
         ids = failed_ids(log)
-        items |= {(label, id) for id in ids} if ids else {(label, NO_TEST_IDS)}
+        items |= {(label, test_id) for test_id in ids} if ids else {(label, NO_TEST_IDS)}
     return items
 
 
@@ -344,7 +351,7 @@ def set_hash(items):
     """sha256 hex of a failure set, or '-' when it is None (unknown)."""
     if items is None:
         return "-"
-    text = "\n".join(sorted(f"{label}\t{id}" for label, id in items))
+    text = "\n".join(sorted(f"{label}\t{test_id}" for label, test_id in items))
     return hashlib.sha256(text.encode()).hexdigest()
 
 
@@ -359,8 +366,8 @@ def records(log):
     for line in log.splitlines():
         match = RECORD.fullmatch(clean(line))
         if match:
-            canary, result, hash, count, ts = match.groups()
-            found[canary] = Record(canary, result, hash, int(count), ts)
+            canary, result, digest, count, ts = match.groups()
+            found[canary] = Record(canary, result, digest, int(count), ts)
     return found
 
 
@@ -621,21 +628,25 @@ class Slack:
     def update(self, ts, text):
         """Edit the message at `ts` (chat.update); a no-op on the webhook path.
 
-        On failure it warns and returns: the alert is already posted, so the
-        edit just carries the repeat count, which the next run tries again.
+        On a failed edit it warns and returns: the alert is already posted, so
+        the edit only carries the repeat count, which the next run tries again.
+        A failed edit is a not-ok reply or a transport error from request().
         """
         if not self.threads:
             return
         body = {"channel": self.channel, "ts": ts, "text": text, "link_names": False, "unfurl_links": False, "unfurl_media": False}
-        response = json.loads(
-            request(
-                "https://slack.com/api/chat.update",
-                json.dumps(body).encode(),
-                {"Content-Type": "application/json; charset=utf-8", "Authorization": f"Bearer {self.bot_token}"},
+        try:
+            response = json.loads(
+                request(
+                    "https://slack.com/api/chat.update",
+                    json.dumps(body).encode(),
+                    {"Content-Type": "application/json; charset=utf-8", "Authorization": f"Bearer {self.bot_token}"},
+                )
             )
-        )
-        if not response.get("ok"):
-            print(f"::warning::chat.update failed: {response.get('error')}")
+            if not response.get("ok"):
+                print(f"::warning::chat.update failed: {response.get('error')}")
+        except Exception as e:
+            print(f"::warning::chat.update failed: {e!r}")
 
 
 def job_url(server, repo, job):
@@ -770,20 +781,20 @@ def main():
             print(record_line(Record(name, "green", "-", 0, "-")))
             continue
 
-        hash = set_hash(failure_set(parts, read_log))
+        digest = set_hash(failure_set(parts, read_log))
         if before == "red":
             record = read_record(name, previous)
-            if record and record.state == "red" and record.hash != "-" and record.hash == hash:
+            if record and record.state == "red" and record.hash != "-" and record.hash == digest:
                 count = record.count + 1
                 print(f"{name}: still red, same failures (x{count})")
                 if record.ts != "-":  # the webhook path left no message to edit
                     slack.update(record.ts, f"{current_alert(name, parts, True)}\n{repeat_line(count, run)}")
-                print(record_line(Record(name, "red", hash, count, record.ts)))
+                print(record_line(Record(name, "red", digest, count, record.ts)))
                 continue
 
         print(f"{name}: now red")
         ts = announce(name, parts, True)
-        print(record_line(Record(name, "red", hash, 0, ts or "-")))
+        print(record_line(Record(name, "red", digest, 0, ts or "-")))
 
 
 if __name__ == "__main__":
