@@ -64,7 +64,7 @@ test: |                     # every static analysis tool CI runs, plus the tests
   exit $status
 ```
 
-`--exclude-newer false` clears the global cooldown. A repository with a `[tool.uv.exclude-newer-package]` table also needs `--no-config`, which makes uv ignore the repository's uv settings.
+`--exclude-newer false` clears the global cooldown. A repository with a `[tool.uv.exclude-newer-package]` table also needs `--no-config`, which makes uv ignore all uv settings of the repository. These include `[tool.uv.sources]` and indexes, so make sure that the install does not need them.
 
 Optional fields: `runs-on` (a runner label; default `ubuntu-latest`), `node` (a Node.js version to set up before installing), and `static-analysis-exempt` (a reason string, for a canary whose repository has no type checker or eslint to run; a top-level field, not allowed in a variant). Set environment variables inside `install` or `test` with `export`.
 
