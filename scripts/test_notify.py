@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 from datetime import datetime, timedelta
@@ -92,15 +93,15 @@ class State(unittest.TestCase):
         self.assertEqual(notify.previous_job("inspect_ai", history, want=("green",))["id"], 5)
         self.assertIsNone(notify.previous_job("new", history))
 
-    def test_only_changes_alert(self):
-        self.assertTrue(notify.changed("red", "green"))
-        self.assertTrue(notify.changed("green", "red"))
-        self.assertFalse(notify.changed("red", "red"))
-        self.assertFalse(notify.changed("green", "green"))
-
-    def test_new_canary_counts_as_previously_green(self):
-        self.assertTrue(notify.changed("red", None))
-        self.assertFalse(notify.changed("green", None))
+    def test_previous_run_returns_the_jobs_that_ran_the_canary(self):
+        history = [
+            [job("plan", "success"), job("b", "success")],
+            [job("a (x)", "cancelled"), job("a (y)", "skipped")],
+            [job("a (x)", "success", id=7), job("a (y)", "failure", id=8)],
+            [job("a (x)", "success"), job("a (y)", "success")],
+        ]
+        self.assertEqual([j["id"] for j in notify.previous_run("a", history)], [7, 8])
+        self.assertIsNone(notify.previous_run("new", history))
 
 
 class Grouping(unittest.TestCase):
@@ -556,6 +557,68 @@ class Messages(unittest.TestCase):
         self.assertNotIn("Tested", green)
 
 
+class FailureSet(unittest.TestCase):
+    def test_failed_ids_reads_only_marker_lines(self):
+        log = "\n".join(
+            [
+                line("00:00", "canary-failed: tests/a.py::test_one"),
+                line("00:00", f"canary-failed: {ESC}[31mtests/b.py::test_two{ESC}[0m"),
+                line("00:00", "canary-failed: tests/a.py::test_one"),  # duplicate, dropped
+                line("00:00", "FAILED tests/c.py::test_three"),  # not a marker line
+                line("00:00", "canary-failed:   "),  # empty id, dropped
+            ]
+        )
+        self.assertEqual(notify.failed_ids(log), ["tests/a.py::test_one", "tests/b.py::test_two"])
+
+    def test_failure_set_of_red_parts(self):
+        parts = [job("a (x)", "failure", id=1), job("a (y)", "failure", id=2), job("a (z)", "success", id=3)]
+        logs = {1: "canary-failed: t1\ncanary-failed: t2", 2: "no ids here"}
+        self.assertEqual(
+            notify.failure_set(parts, lambda j: logs.get(j["id"], "")),
+            {("x", "t1"), ("x", "t2"), ("y", notify.NO_TEST_IDS)},
+        )
+
+    def test_failure_set_without_parts_uses_an_empty_label(self):
+        parts = [job("a", "failure", id=1)]
+        self.assertEqual(notify.failure_set(parts, lambda j: "canary-failed: t1"), {("", "t1")})
+
+    def test_failure_set_is_unknown_when_a_red_log_cannot_be_read(self):
+        parts = [job("a (x)", "failure", id=1), job("a (y)", "failure", id=2)]
+        self.assertIsNone(notify.failure_set(parts, lambda j: None if j["id"] == 2 else "canary-failed: t1"))
+
+    def test_hash_matches_whatever_the_order(self):
+        one = notify.set_hash({("x", "t1"), ("y", "t2")})
+        two = notify.set_hash({("y", "t2"), ("x", "t1")})
+        self.assertEqual(one, two)
+        self.assertNotEqual(one, notify.set_hash({("x", "t1")}))
+        self.assertEqual(notify.set_hash(None), "-")
+
+    def test_records_parse_only_valid_lines(self):
+        H = "a" * 64
+        log = "\n".join(
+            [
+                line("00:00", f"canary-notify: inspect_ai red {H} 3 1700000000.5"),
+                line("00:00", "canary-notify: other green - 0 -"),
+                line("00:00", "canary-notify: bad red tooshort 0 -"),  # malformed hash, ignored
+                line("00:00", "inspect_ai: now red"),  # not a record
+            ]
+        )
+        found = notify.records(log)
+        self.assertEqual(found["inspect_ai"], notify.Record("inspect_ai", "red", H, 3, "1700000000.5"))
+        self.assertEqual(found["other"], notify.Record("other", "green", "-", 0, "-"))
+        self.assertNotIn("bad", found)
+
+    def test_record_line_round_trips(self):
+        record = notify.Record("a", "red", "b" * 64, 2, "1.0")
+        self.assertEqual(notify.records(notify.record_line(record)), {"a": record})
+
+    def test_repeat_line_counts_and_formats_the_time(self):
+        run = {"run_started_at": "2026-10-29T20:01:00Z"}  # 4:01 PM in New York
+        self.assertEqual(notify.repeat_line(1, run), "Same failures in 1 more run, last at Oct 29, 4:01 PM ET")
+        self.assertEqual(notify.repeat_line(3, run), "Same failures in 3 more runs, last at Oct 29, 4:01 PM ET")
+        self.assertEqual(notify.repeat_line(1, {"created_at": "2026-10-29T20:01:00Z"}), notify.repeat_line(1, run))
+
+
 BASE = datetime(2026, 10, 23, 4)
 
 
@@ -573,8 +636,11 @@ class FakeServices:
         self.logs = {}
         self.posts = []
         self.listings = []
+        self.raise_on = None  # a substring of a GET url that should fail
 
     def __call__(self, url, data=None, headers=None, opener=None, read=None):
+        if self.raise_on and self.raise_on in url:  # a GET or a Slack post that fails to reach its server
+            raise notify.urllib.error.URLError("boom")
         if data is not None:
             body = json.loads(data)
             self.posts.append((url, body))
@@ -597,6 +663,19 @@ class FakeServices:
         raise AssertionError(url)
 
 
+def red_record(canary, *items, count=0, ts="-"):
+    """A `canary-notify:` line for a red canary. `items` are its (label, id)
+    failure-set pairs; with none, the canary has one part with no test ids."""
+    items = items or (("", notify.NO_TEST_IDS),)
+    return notify.record_line(notify.Record(canary, "red", notify.set_hash(set(items)), count, ts))
+
+
+def notified(run_id, log, logs, id):
+    """A completed notify job for a previous run; stores its `log` under `id`."""
+    logs[id] = log
+    return job("notify", "success", id=id, run_id=run_id)
+
+
 ENV = {
     "GITHUB_SERVER_URL": "https://github.com",
     "GITHUB_API_URL": "https://api.github.com",
@@ -610,17 +689,24 @@ class Main(unittest.TestCase):
     def run_main(self, runs, env, logs=None):
         fake = FakeServices(runs)
         fake.logs = logs or {}
-        with mock.patch.dict(os.environ, {**ENV, **env}, clear=True), mock.patch.object(notify, "request", fake), mock.patch.object(notify.time, "sleep"):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {**ENV, **env}, clear=True), mock.patch.object(notify, "request", fake), mock.patch.object(notify.time, "sleep"), contextlib.redirect_stdout(out):
             notify.main()
+        self.output = out.getvalue()
         return fake.posts
+
+    def records(self):
+        """The `canary-notify:` records main() printed to its log, by canary."""
+        return notify.records(self.output)
 
     def test_turning_red_posts_an_alert_and_a_threaded_reply(self):
         failing_steps = CANARY_STEPS + [step("Test", "failure", "00:09", "06:31", 5)]
+        logs = {2: canary_log(test_output=["FAILED tests/t.py::test_x - boom", "canary-failed: tests/t.py::test_x"]), 6: canary_log(sha=OLD_SHA, versions=(("anyio", "4.10.0"),))}
         runs = {
             100: [job("plan", "success", id=1, run_id=100), job("inspect_ai", "failure", id=2, run_id=100, steps=failing_steps), job("other", "failure", id=3, run_id=100), job("notify", None, id=4, run_id=100)],
-            99: [job("plan", "success", id=5, run_id=99), job("inspect_ai", "success", id=6, run_id=99, steps=CANARY_STEPS), job("other", "failure", id=7, run_id=99)],
+            # `other` was already red with the same failures last run, so only inspect_ai alerts.
+            99: [job("plan", "success", id=5, run_id=99), job("inspect_ai", "success", id=6, run_id=99, steps=CANARY_STEPS), job("other", "failure", id=7, run_id=99), notified(99, red_record("other"), logs, 8)],
         }
-        logs = {2: canary_log(test_output=["FAILED tests/t.py::test_x - boom"]), 6: canary_log(sha=OLD_SHA, versions=(("anyio", "4.10.0"),))}
         posts = self.run_main(runs, {"SLACK_BOT_TOKEN": "xoxb", "SLACK_CHANNEL_ID": "C1"}, logs)
         self.assertEqual(len(posts), 2)
         (url, alert), (_, reply) = posts
@@ -632,13 +718,21 @@ class Main(unittest.TestCase):
         self.assertIn("tests/t.py::test_x", reply["text"])
         self.assertIn("anyio 4.10.0 → 4.11.0", reply["text"])
         self.assertIn("https://github.com/o/r/actions/runs/99/job/6", reply["text"])
+        # One record per canary with a result: inspect_ai red (count 0, its ts), other red (same set, count 1).
+        self.assertEqual(self.records()["inspect_ai"], notify.Record("inspect_ai", "red", notify.set_hash({("", "tests/t.py::test_x")}), 0, "1.0"))
+        self.assertEqual(self.records()["other"], notify.Record("other", "red", notify.set_hash({("", notify.NO_TEST_IDS)}), 1, "-"))
 
     def test_staying_red_or_green_posts_nothing(self):
+        logs = {}
         runs = {
             100: [job("a", "failure", run_id=100), job("b", "success", run_id=100), job("c", "cancelled", run_id=100)],
-            99: [job("a", "failure", run_id=99), job("b", "success", run_id=99), job("c", "success", run_id=99)],
+            99: [job("a", "failure", run_id=99), job("b", "success", run_id=99), job("c", "success", run_id=99), notified(99, red_record("a"), logs, 90)],
         }
-        self.assertEqual(self.run_main(runs, {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}), [])
+        self.assertEqual(self.run_main(runs, {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}, logs), [])
+        # a stays red with the same failures (count rises); b stays green; c didn't run, so no record.
+        self.assertEqual(self.records()["a"], notify.Record("a", "red", notify.set_hash({("", notify.NO_TEST_IDS)}), 1, "-"))
+        self.assertEqual(self.records()["b"], notify.Record("b", "green", "-", 0, "-"))
+        self.assertNotIn("c", self.records())
 
     def test_recovery_through_the_webhook(self):
         runs = {100: [job("a", "success", run_id=100)], 99: [job("a", "skipped", run_id=99)], 98: [job("a", "failure", run_id=98)]}
@@ -691,7 +785,8 @@ class Main(unittest.TestCase):
         self.assertEqual(self.run_main(runs, {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}), [])
 
     def history(self, total, nightly_at, current, other_jobs=True):
-        """The current run plus `total` earlier runs; `nightly` ran only in the run `nightly_at` back."""
+        """The current run plus `total` earlier runs; `nightly` ran only in the run
+        `nightly_at` back, where it failed and its notify job (id 6000) recorded it."""
         runs = {100: [job("plan", "success", run_id=100), job("nightly", current, id=1, run_id=100)]}
         for n in range(1, total + 1):
             jobs = [job("plan", "success", run_id=1000 + n)]
@@ -699,12 +794,16 @@ class Main(unittest.TestCase):
                 jobs.append(job("hourly", "success", run_id=1000 + n))
             if n == nightly_at:
                 jobs.append(job("nightly", "failure", id=5000, run_id=1000 + n))
+                jobs.append(job("notify", "success", id=6000, run_id=1000 + n))
             runs[1000 + n] = jobs
         return runs
 
+    # The record a nightly's notify job wrote when it failed with no test ids.
+    NIGHTLY_RED = {6000: red_record("nightly")}
+
     def test_history_pages_back_past_100_runs(self):
-        # Still red: the earlier failure is 130 runs back, beyond the first page.
-        fake_posts = self.run_main(self.history(150, 130, "failure"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"})
+        # Still red with the same failures: the earlier failure is 130 runs back, beyond the first page.
+        fake_posts = self.run_main(self.history(150, 130, "failure"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}, self.NIGHTLY_RED)
         self.assertEqual(fake_posts, [])
         # Recovered: the same history, now green, alerts.
         posts = self.run_main(self.history(150, 130, "success"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"})
@@ -713,6 +812,7 @@ class Main(unittest.TestCase):
 
     def test_history_pages_by_creation_time(self):
         fake = FakeServices(self.history(150, 130, "failure"))
+        fake.logs = self.NIGHTLY_RED
         with mock.patch.dict(os.environ, {**ENV, "SLACK_WEBHOOK_URL": "https://hooks.example/x"}, clear=True), mock.patch.object(notify, "request", fake):
             notify.main()
         bounds = [q["created"][0] for q in fake.listings]
@@ -735,9 +835,9 @@ class Main(unittest.TestCase):
             notify.main()
         self.assertEqual(len(fake.posts), 1)
         self.assertIn("Canary `nightly` is failing", fake.posts[0][1]["text"])
-        # Its second failure finds the first and stays quiet.
+        # Its second failure finds the first, with the same failures, and stays quiet.
         runs = self.history(total, 1, "failure")
-        self.assertEqual(self.run_main(runs, {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}), [])
+        self.assertEqual(self.run_main(runs, {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}, self.NIGHTLY_RED), [])
         # A result beyond the limit isn't searched for: that canary counts as new too.
         self.assertEqual(len(self.run_main(self.history(total, total, "failure"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"})), 1)
         self.assertEqual(self.run_main(self.history(total, total, "success"), {"SLACK_WEBHOOK_URL": "https://hooks.example/x"}), [])
@@ -800,9 +900,18 @@ class Main(unittest.TestCase):
         self.assertLess(len(alert), 1000)
         self.assertIn("14 more failing parts not shown: see <https://github.com/o/r/actions/runs/100|the run>", reply)
 
-    def test_a_canary_staying_red_is_quiet_whichever_part_fails(self):
-        runs = {100: [job("a (x)", "success", run_id=100), job("a (y)", "failure", run_id=100)], 99: [job("a (x)", "failure", run_id=99), job("a (y)", "success", run_id=99)]}
-        self.assertEqual(self.run_main(runs, self.WEBHOOK), [])
+    def test_a_canary_that_stays_red_with_a_different_failing_part_posts(self):
+        # Red both runs, but the failing part changed, so the failure set changed: post.
+        logs = {}
+        runs = {
+            100: [job("a (x)", "success", id=11, run_id=100), job("a (y)", "failure", id=12, run_id=100)],
+            99: [job("a (x)", "failure", id=21, run_id=99), job("a (y)", "success", id=22, run_id=99), notified(99, red_record("a", ("x", notify.NO_TEST_IDS)), logs, 29)],
+        }
+        posts = self.run_main(runs, self.WEBHOOK, logs)
+        self.assertEqual(len(posts), 1)
+        self.assertIn("Canary `a` is failing on the newest releases (`y`).", posts[0][1]["text"])
+        self.assertEqual(self.records()["a"], notify.Record("a", "red", notify.set_hash({("y", notify.NO_TEST_IDS)}), 0, "-"))
+        # A part that didn't run leaves the canary green, which stays quiet after green.
         runs = {100: [job("a (x)", "success", run_id=100), job("a (y)", "cancelled", run_id=100)], 99: [job("a (x)", "success", run_id=99), job("a (y)", "success", run_id=99)]}
         self.assertEqual(self.run_main(runs, self.WEBHOOK), [])
 
@@ -823,12 +932,22 @@ class Main(unittest.TestCase):
         self.assertEqual(len(posts), 1)
         self.assertIn("Canary `a` recovered", posts[0][1]["text"])
         self.assertIn("<https://github.com/o/r/actions/runs/100/job/11|Run log>", posts[0][1]["text"])
-        before = [job("a (x)", "failure", run_id=99), job("a (y)", "failure", run_id=99)]
-        self.assertEqual(self.run_main({100: [job("a (y)", "failure", run_id=100)], 99: before}, self.WEBHOOK), [])
+        # Both parts failed last run; now only one fails, so the failure set shrank: post.
+        logs = {}
+        items = (("x", notify.NO_TEST_IDS), ("y", notify.NO_TEST_IDS))
+        before = [job("a (x)", "failure", id=31, run_id=99), job("a (y)", "failure", id=32, run_id=99), notified(99, red_record("a", *items), logs, 39)]
+        posts = self.run_main({100: [job("a (y)", "failure", run_id=100)], 99: before}, self.WEBHOOK, logs)
+        self.assertEqual(len(posts), 1)
+        self.assertIn("Canary `a` is failing on the newest releases (`y`).", posts[0][1]["text"])
 
-    def test_a_canary_split_into_parts_keeps_its_state(self):
+    def test_a_canary_split_into_parts_keeps_its_name(self):
         now = [job("a (x)", "failure", id=11, run_id=100), job("a (y)", "success", id=12, run_id=100)]
-        self.assertEqual(self.run_main({100: now, 99: [job("a", "failure", run_id=99)]}, self.WEBHOOK), [])
+        # The split canary is still grouped under `a`; it was red and stays red, but the
+        # failing part's label changed the failure set, so it posts once.
+        logs = {}
+        posts = self.run_main({100: now, 99: [job("a", "failure", id=20, run_id=99), notified(99, red_record("a"), logs, 29)]}, self.WEBHOOK, logs)
+        self.assertEqual(len(posts), 1)
+        self.assertIn("Canary `a` is failing on the newest releases (`x`).", posts[0][1]["text"])
         posts = self.run_main({100: now, 99: [job("a", "success", id=21, run_id=99)]}, self.BOT)
         self.assertEqual(len(posts), 2)
         self.assertIn("Canary `a` is failing", posts[0][1]["text"])
@@ -845,13 +964,128 @@ class Main(unittest.TestCase):
         self.assertEqual(self.run_main({}, {"TEST_SLACK": "true"}), [])
 
     def test_a_red_nightly_canary_rechecked_every_2_hours(self):
-        """Nightly red, then 2-hour re-checks red, red, green: one alert, then one recovery."""
+        """Nightly red, then 2-hour re-checks red, red, green: one alert, then one
+        recovery. Each run's notify records feed the next, so the repeated reds are quiet."""
         posts = []
         for now in range(len(RECHECK_TIMELINE)):
-            posts.append([body["text"] for _, body in self.run_main(timeline_runs(now), self.WEBHOOK)])
+            runs = timeline_runs(now)
+            posts.append([body["text"] for _, body in self.run_main(runs, self.WEBHOOK, timeline_logs(runs))])
         self.assertEqual([len(p) for p in posts], [0, 0, 1, 0, 0, 1, 0, 0])
         self.assertIn("Canary `n` is failing", posts[2][0])
         self.assertIn("Canary `n` recovered", posts[5][0])
+
+    def red_again(self, now_ids, record, env, logs_before=()):
+        """A canary red this run with `now_ids`, red last run with `record`;
+        returns the posts. `logs_before` are extra current-run log lines."""
+        logs = {12: canary_log(test_output=[f"canary-failed: {i}" for i in now_ids] + list(logs_before))}
+        runs = {
+            100: [job("a", "failure", id=12, run_id=100)],
+            99: [job("a", "failure", id=22, run_id=99), notified(99, record, logs, 29)],
+        }
+        return self.run_main(runs, env, logs)
+
+    def test_the_same_failures_edit_the_last_post_with_a_count(self):
+        posts = self.red_again(["t1", "t2"], red_record("a", ("", "t1"), ("", "t2"), count=2, ts="1700000000.5"), self.BOT)
+        self.assertEqual(len(posts), 1)  # a single chat.update, no new post
+        url, body = posts[0]
+        self.assertEqual(url, "https://slack.com/api/chat.update")
+        self.assertEqual(body["ts"], "1700000000.5")
+        self.assertIn("Canary `a` is failing", body["text"])
+        self.assertIn("Same failures in 3 more runs, last at ", body["text"])
+        self.assertEqual(self.records()["a"], notify.Record("a", "red", notify.set_hash({("", "t1"), ("", "t2")}), 3, "1700000000.5"))
+
+    def test_an_added_failure_posts_a_new_alert(self):
+        posts = self.red_again(["t1", "t2"], red_record("a", ("", "t1"), ts="1.0"), self.BOT)
+        self.assertEqual(len(posts), 2)  # a fresh alert and its reply, not an edit
+        self.assertEqual(posts[0][0], "https://slack.com/api/chat.postMessage")
+        self.assertIn("Canary `a` is failing", posts[0][1]["text"])
+        self.assertEqual(self.records()["a"], notify.Record("a", "red", notify.set_hash({("", "t1"), ("", "t2")}), 0, "1.0"))
+
+    def test_a_removed_failure_posts_a_new_alert(self):
+        posts = self.red_again(["t1"], red_record("a", ("", "t1"), ("", "t2"), ts="1.0"), self.BOT)
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(self.records()["a"].count, 0)
+        self.assertEqual(self.records()["a"].hash, notify.set_hash({("", "t1")}))
+
+    def test_long_ids_with_a_shared_prefix_stay_distinct(self):
+        """Review R2: two ids that share their first 300+ characters must not
+        hash the same. Last run recorded one, this run has the other, so a new
+        alert goes out, not a quiet edit. The previous record comes from the
+        same code, so a truncated id would make this run look unchanged."""
+        prefix = "pkg/test_long.py::test_" + "x" * 320  # longer than LINE_CHARS
+        for old_id, new_id in (("a", "b"), ("b", "a")):
+            with self.subTest(change=f"{old_id}->{new_id}"):
+                before = {
+                    100: [job("a", "failure", id=12, run_id=100)],
+                    99: [job("a", "success", id=22, run_id=99)],
+                }
+                self.run_main(before, self.BOT, {12: canary_log(test_output=[f"canary-failed: {prefix}{old_id}"])})
+                record = notify.record_line(self.records()["a"])
+                posts = self.red_again([prefix + new_id], record, self.BOT)
+                self.assertEqual(len(posts), 2)  # a fresh alert and its reply, not an edit
+                self.assertEqual(posts[0][0], "https://slack.com/api/chat.postMessage")
+                self.assertFalse(any(url.endswith("chat.update") for url, _ in posts))
+
+    def test_a_failing_update_still_records_and_handles_the_next_canary(self):
+        # a stays red with the same failures, so notify edits its last post; the
+        # edit fails to reach Slack. a's record still carries count+1 and the old
+        # ts, and b, the next canary in the same run, is still handled.
+        logs = {}
+        runs = {
+            100: [job("a", "failure", id=12, run_id=100), job("b", "failure", id=13, run_id=100)],
+            99: [job("a", "failure", id=22, run_id=99), job("b", "success", id=23, run_id=99), notified(99, red_record("a", count=2, ts="1700000000.5"), logs, 29)],
+        }
+        fake = FakeServices(runs)
+        fake.logs = logs
+        fake.raise_on = "chat.update"
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {**ENV, **self.BOT}, clear=True), mock.patch.object(notify, "request", fake), mock.patch.object(notify.time, "sleep"), contextlib.redirect_stdout(out):
+            notify.main()
+        self.output = out.getvalue()
+        self.assertIn("::warning::chat.update failed:", self.output)
+        self.assertEqual(self.records()["a"], notify.Record("a", "red", notify.set_hash({("", notify.NO_TEST_IDS)}), 3, "1700000000.5"))
+        self.assertTrue(any("Canary `b` is failing" in body.get("text", "") for _, body in fake.posts))
+        self.assertEqual(self.records()["b"].count, 0)
+
+    def test_a_recovery_posts_without_a_readable_record(self):
+        # Red last run by its job results, now green, but that run has no notify
+        # job, so no record. The recovery still posts once.
+        runs = {100: [job("a", "success", run_id=100)], 99: [job("a", "failure", run_id=99)]}
+        posts = self.run_main(runs, self.WEBHOOK)
+        self.assertEqual(len(posts), 1)
+        self.assertIn("Canary `a` recovered", posts[0][1]["text"])
+        self.assertEqual(self.records()["a"].state, "green")
+
+    def test_an_unreadable_record_posts_the_red_results(self):
+        # Red last run too, but that run has no completed notify job: post, with a warning.
+        runs = {100: [job("a", "failure", id=12, run_id=100)], 99: [job("a", "failure", id=22, run_id=99)]}
+        posts = self.run_main(runs, self.WEBHOOK)
+        self.assertEqual(len(posts), 1)
+        self.assertIn("Canary `a` is failing", posts[0][1]["text"])
+        self.assertEqual(self.records()["a"].count, 0)
+        self.assertIn("::warning::a: its last run has no completed notify job", self.output)
+
+    def test_a_malformed_record_is_ignored(self):
+        logs = {}
+        runs = {
+            100: [job("a", "failure", id=12, run_id=100)],
+            99: [job("a", "failure", id=22, run_id=99), notified(99, "canary-notify: a red not-a-hash 0 -", logs, 29)],
+        }
+        posts = self.run_main(runs, self.WEBHOOK, logs)
+        self.assertEqual(len(posts), 1)  # the line didn't parse, so the record is unknown
+        self.assertIn("::warning::a: no record in its last notify log", self.output)
+
+    def test_an_unreadable_history_posts_red_and_stays_quiet_on_green(self):
+        for current, want in (("failure", 1), ("success", 0)):
+            with self.subTest(current=current):
+                fake = FakeServices({100: [job("a", current, id=1, run_id=100)], 99: [job("a", "failure", run_id=99)]})
+                fake.raise_on = "workflows/7/runs"
+                out = io.StringIO()
+                with mock.patch.dict(os.environ, {**ENV, **self.WEBHOOK}, clear=True), mock.patch.object(notify, "request", fake), mock.patch.object(notify.time, "sleep"), contextlib.redirect_stdout(out):
+                    notify.main()
+                self.assertEqual(len(fake.posts), want)
+                self.assertIn("::warning::history for a", out.getvalue())
+                self.assertEqual(notify.records(out.getvalue())["a"].state, "red" if current == "failure" else "green")
 
 
 # Scheduled runs, oldest first: which canaries each ran, and how they ended.
@@ -871,16 +1105,38 @@ RECHECK_TIMELINE = [
 
 def timeline_runs(now, current=None):
     """FakeServices runs with RECHECK_TIMELINE[now] as the current run (or
-    `current` jobs instead), and the earlier ones before it."""
+    `current` jobs instead), and the earlier ones before it. Each run has a
+    notify job (id run_id*10+9) that its own records go under."""
     def jobs(results, run_id):
-        return [job("plan", "success", id=run_id * 10, run_id=run_id)] + [
-            job(name, conclusion, id=run_id * 10 + i, run_id=run_id) for i, (name, conclusion) in enumerate(results.items(), 1)
-        ]
+        return (
+            [job("plan", "success", id=run_id * 10, run_id=run_id)]
+            + [job(name, conclusion, id=run_id * 10 + i, run_id=run_id) for i, (name, conclusion) in enumerate(results.items(), 1)]
+            + [job("notify", "success", id=run_id * 10 + 9, run_id=run_id)]
+        )
 
     runs = {100: jobs(RECHECK_TIMELINE[now][1], 100) if current is None else current}
     for i in reversed(range(now)):
         runs[i + 1] = jobs(RECHECK_TIMELINE[i][1], i + 1)
     return runs
+
+
+def timeline_logs(runs):
+    """The notify log of each earlier run: the records notify wrote for it (no
+    test ids, so each red canary's set is just its one no-ids item)."""
+    logs = {}
+    for run_id, jobs in runs.items():
+        if run_id == 100:  # the current run's notify is in progress
+            continue
+        notify_job = next(j for j in jobs if j["name"] == "notify")
+        lines = []
+        for name, parts in notify.by_canary(jobs).items():
+            state = notify.canary_state(parts)
+            if state == "green":
+                lines.append(notify.record_line(notify.Record(name, "green", "-", 0, "-")))
+            elif state == "red":
+                lines.append(red_record(name))
+        logs[notify_job["id"]] = "\n".join(lines)
+    return logs
 
 
 @contextlib.contextmanager
@@ -1052,3 +1308,85 @@ class SlackFallback(unittest.TestCase):
         with mock.patch.object(notify, "request", fake):
             with self.assertRaises(RuntimeError):
                 slack.post("alert")
+
+
+class SlackUpdate(unittest.TestCase):
+    def test_update_edits_the_message_through_the_bot_token(self):
+        calls = []
+
+        def fake_request(url, data=None, headers=None):
+            calls.append((url, json.loads(data)))
+            return json.dumps({"ok": True}).encode()
+
+        slack = notify.Slack("xoxb-test", "C123", "https://hooks.example/abc")
+        with mock.patch.object(notify, "request", fake_request):
+            slack.update("1700000000.5", "edited text")
+        url, body = calls[0]
+        self.assertEqual(url, "https://slack.com/api/chat.update")
+        self.assertEqual((body["channel"], body["ts"], body["text"]), ("C123", "1700000000.5", "edited text"))
+
+    def test_update_is_a_no_op_on_the_webhook_path(self):
+        calls = []
+        slack = notify.Slack(None, None, "https://hooks.example/abc")
+        with mock.patch.object(notify, "request", lambda *a, **k: calls.append(a)):
+            slack.update("1.0", "edited text")
+        self.assertEqual(calls, [])
+
+    def test_a_failing_update_warns_and_returns(self):
+        fake = lambda *a, **k: json.dumps({"ok": False, "error": "message_not_found"}).encode()
+        slack = notify.Slack("xoxb-test", "C123", None)
+        out = io.StringIO()
+        with mock.patch.object(notify, "request", fake), contextlib.redirect_stdout(out):
+            slack.update("1.0", "edited text")  # does not raise
+        self.assertIn("::warning::chat.update failed: message_not_found", out.getvalue())
+
+
+class FailedTestsStep(unittest.TestCase):
+    """The inline `Failed tests` script in canary.yml, run on sample JUnit XML."""
+
+    def script(self):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, ".github", "workflows", "canary.yml")
+        with open(path) as f:
+            text = f.read()
+        body = text.split("<<'PY'\n", 1)[1].split("\n          PY\n", 1)[0]
+        return textwrap.dedent(body)
+
+    def run_script(self, files):
+        """Run the script with `files` written to $RUNNER_TEMP/junit (None: no junit dir)."""
+        tmp = tempfile.mkdtemp()
+        if files is not None:
+            junit = os.path.join(tmp, "junit")
+            os.makedirs(junit)
+            for name, content in files.items():
+                with open(os.path.join(junit, name), "w") as f:
+                    f.write(content)
+        return subprocess.run([sys.executable, "-I", "-"], input=self.script(), text=True, capture_output=True, env={"RUNNER_TEMP": tmp})
+
+    PASS = '<testsuite><testcase classname="tests.test_a" name="test_ok"/></testsuite>'
+    FAIL = '<testsuites><testsuite><testcase classname="tests.test_a" name="test_bad"><failure>boom</failure></testcase></testsuite></testsuites>'
+    ERROR = '<testsuite><testcase classname="tests.test_b" name="test_err"><error>fixture</error></testcase></testsuite>'
+    NO_CLASS = '<testsuite><testcase classname="" name="test_top"><failure>no</failure></testcase></testsuite>'
+
+    def test_reports_failures_errors_counts_and_bad_files(self):
+        result = self.run_script(
+            {"pytest.xml": self.FAIL, "extra.xml": self.ERROR, "pass.xml": self.PASS, "top.xml": self.NO_CLASS, "broken.xml": "<not closed"}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertIn("canary-junit: pytest.xml 1 1", lines)
+        self.assertIn("canary-failed: tests.test_a::test_bad", lines)
+        self.assertIn("canary-junit: extra.xml 1 1", lines)
+        self.assertIn("canary-failed: tests.test_b::test_err", lines)  # an <error> counts too
+        self.assertIn("canary-junit: pass.xml 1 0", lines)  # a pass adds no canary-failed line
+        self.assertIn("canary-junit: top.xml 1 1", lines)
+        self.assertIn("canary-failed: test_top", lines)  # empty classname -> just the name
+        self.assertIn("canary-junit: broken.xml unreadable", lines)  # a bad file never fails the job
+        self.assertNotIn("test_ok", result.stdout)
+        # Every id the step prints is a line notify.py reads back.
+        ids = [notify.clean(line) for line in lines]
+        self.assertEqual(set(notify.failed_ids("\n".join(ids))), {"tests.test_a::test_bad", "tests.test_b::test_err", "test_top"})
+
+    def test_no_junit_directory_prints_nothing(self):
+        result = self.run_script(None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
