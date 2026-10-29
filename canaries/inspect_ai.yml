@@ -17,8 +17,10 @@ cadence: 2h
 python: "3.11"
 timeout-minutes: 60
 # The slow suite's environment, for asyncio and trio.
-# Each install also passes --no-config: --exclude-newer false alone keeps the
-# per-package cooldowns in the repo's [tool.uv.exclude-newer-package].
+# Each install passes both flags. --exclude-newer false alone keeps the repo's
+# per-package cooldowns ([tool.uv.exclude-newer-package]); --no-config drops
+# them. --exclude-newer false also overrides UV_EXCLUDE_NEWER if a runner sets
+# it; --no-config doesn't.
 install: |
   uv venv
   uv pip install --no-config --exclude-newer false -e ".[dev]" pytest-timeout
