@@ -57,6 +57,6 @@ variants:
     timeout-minutes: 30
     install: |
       uv venv
-      uv pip install --no-config --exclude-newer false -r requirements-doc.txt .
+      uv pip install --no-config --exclude-newer false ".[doc]"
     test: |
       uv run --no-sync quarto render docs
