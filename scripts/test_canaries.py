@@ -338,9 +338,9 @@ class RealCanaries(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
-class InstallLinesUnchanged(unittest.TestCase):
-    # Only the inspect_ai canary moves to install-with; its sandbox-tools leg
-    # keeps its install line.
+class RealInstallWithLegs(unittest.TestCase):
+    # Only the inspect_ai asyncio, trio and docs legs use install-with; the
+    # sandbox-tools leg uses install.
     @classmethod
     def setUpClass(cls):
         paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))

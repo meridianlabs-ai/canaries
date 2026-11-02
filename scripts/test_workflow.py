@@ -62,8 +62,8 @@ def text(value):
 
 
 def cache_is_denied(job):
-    """True if a canary job denies the Actions cache token every write: the job
-    sets cache-mode none, and every shared-action call sets the literal
+    """True if a canary job denies the Actions cache token any read or write:
+    the job sets cache-mode none, and every shared-action call sets the literal
     actions-cache none (both the setup-uv and the install step fix it here)."""
     if job.get("cache-mode") != "none":
         return False
@@ -73,7 +73,7 @@ def cache_is_denied(job):
     return True
 
 
-# Distinctive phrases of the job's warning comment (view 7 of the plan).
+# Distinctive phrases of the job's warning comment.
 WARNING_PHRASES = (
     "unlocked install",
     "newest release",
