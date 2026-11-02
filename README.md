@@ -70,7 +70,7 @@ Instead of `install` lines, a part may set `install-with`: a mapping that drives
 
 Optional fields: `runs-on` (a runner label; default `ubuntu-latest`), `node` (a Node.js version to set up before installing), and `static-analysis-exempt` (a reason string, for a canary whose repository has no type checker or eslint to run; a top-level field, not allowed in a variant). Set environment variables inside `install` or `test` with `export`.
 
-To split a canary into parts that run in parallel, add `variants`: each has a short `label` and may override `python`, `install`, `test`, `runs-on`, `node` or `timeout-minutes`; the rest comes from the top level. Each part is its own job, named `<canary> (<label>)`, but the canary still alerts once: it is red when any part fails, and the alert names the failing parts.
+To split a canary into parts that run in parallel, add `variants`: each has a short `label` and may override `python`, `install`, `install-with`, `test`, `runs-on`, `node` or `timeout-minutes`; the rest comes from the top level. Each part is its own job, named `<canary> (<label>)`, but the canary still alerts once: it is red when any part fails, and the alert names the failing parts.
 
 ```yaml
 variants:

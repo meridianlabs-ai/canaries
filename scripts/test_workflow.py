@@ -86,14 +86,18 @@ WARNING_PHRASES = (
 
 
 def has_warning_comment(workflow_text):
-    """True if the workflow's comments carry the unlocked-install warning. The
-    comment text is normalized (the leading # and line breaks dropped) so a
-    phrase that wraps across lines still matches."""
+    """True if the comment block directly above the canary job carries the
+    unlocked-install warning. The comment text is normalized (the leading # and
+    line breaks dropped) so a phrase that wraps across lines still matches."""
+    lines = workflow_text.splitlines()
+    if "  canary:" not in lines:
+        return False
     words = []
-    for line in workflow_text.splitlines():
+    for line in reversed(lines[: lines.index("  canary:")]):
         stripped = line.lstrip()
-        if stripped.startswith("#"):
-            words.append(stripped.lstrip("#").strip())
+        if not stripped.startswith("#"):
+            break
+        words.insert(0, stripped.lstrip("#").strip())
     comments = " ".join(words)
     return all(phrase in comments for phrase in WARNING_PHRASES)
 
@@ -157,6 +161,19 @@ class CanaryWorkflow(unittest.TestCase):
     def test_the_warning_check_fails_without_the_comment(self):
         no_comments = "\n".join(l for l in raw("canary.yml").splitlines() if not l.lstrip().startswith("#"))
         self.assertFalse(has_warning_comment(no_comments))
+
+    def test_the_warning_check_fails_when_the_comment_leaves_the_canary_job(self):
+        # The same warning above another job doesn't count.
+        lines = raw("canary.yml").splitlines()
+        canary = lines.index("  canary:")
+        start = canary
+        while lines[start - 1].lstrip().startswith("#"):
+            start -= 1
+        warning = lines[start:canary]
+        moved = lines[:start] + lines[canary:]
+        notify = moved.index("  notify:")
+        moved = moved[:notify] + warning + moved[notify:]
+        self.assertFalse(has_warning_comment("\n".join(moved)))
 
     def test_canary_jobs_hand_nothing_to_other_jobs(self):
         self.assertNotIn("outputs", self.jobs["canary"])

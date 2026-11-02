@@ -82,7 +82,7 @@ jobs:
     if: ${{ needs.plan.outputs.count != '0' }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runs-on || 'ubuntu-latest' }}
-    # Deny the Actions cache token any write, so an unvetted release can't
+    # Deny the Actions cache token any read or write, so an unvetted release can't
     # poison the Actions cache. The shared actions also pass actions-cache: none.
     cache-mode: none
     timeout-minutes: ${{ matrix.timeout-minutes }}
@@ -108,9 +108,7 @@ jobs:
 
       # The shared setup-uv holds the one uv pin (0.13.5) for all Meridian
       # callers. actions-cache: none keeps a canary off the Actions cache, so an
-      # unvetted release can't poison it. The step is pinned by SHA to the
-      # actions branch head; step e re-pins it to a tag SHA with a # vX.Y.Z
-      # comment.
+      # unvetted release can't poison it.
       - uses: meridianlabs-ai/actions/setup-uv@29a0bf7e59e74ad3ad6464a72135df91bdea1a1d # epatey/install-python-dependencies
         with:
           python-version: ${{ matrix.python }}

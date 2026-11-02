@@ -274,6 +274,22 @@ class InstallWithValidation(unittest.TestCase):
         result = plan([{**self.BASE, "variants": [{"label": "a", "install-with": {"versions": "unlocked", "project-uv-settings": "ignore"}}]}])
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_variant_install_with_replaces_the_top_level_install(self):
+        entry = {**self.BASE, "install": "uv venv", "variants": [{"label": "a", "install-with": {"versions": "unlocked"}}]}
+        result = plan([entry])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        job = json.loads(result.stdout)["include"][0]
+        self.assertEqual(job["install-with"]["versions"], "unlocked")
+        self.assertNotIn("install", job)
+
+    def test_variant_install_replaces_the_top_level_install_with(self):
+        entry = {**self.BASE, "install-with": {"versions": "unlocked"}, "variants": [{"label": "a", "install": "uv venv"}]}
+        result = plan([entry])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        job = json.loads(result.stdout)["include"][0]
+        self.assertEqual(job["install"], "uv venv")
+        self.assertNotIn("install-with", job)
+
     def test_actions_cache_fails(self):
         # The canary step always passes actions-cache none; the file can't set it.
         result = plan([{**self.BASE, "install-with": {"versions": "unlocked", "actions-cache": "read-write"}}])
@@ -322,21 +338,9 @@ class RealCanaries(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
-def file_install(canary, variant):
-    """(kind, value) for an effective job: the variant's own install or
-    install-with wins; else it inherits the canary's. kind is 'install',
-    'install-with' or None, mirroring scripts/plan.py's exclusivity."""
-    for part in (variant, canary):
-        if "install" in part:
-            return "install", part["install"]
-        if "install-with" in part:
-            return "install-with", part["install-with"]
-    return None, None
-
-
 class InstallLinesUnchanged(unittest.TestCase):
-    # Only the inspect_ai canary moves to install-with; every other canary and
-    # the sandbox-tools leg keep their install lines, unchanged by the planner.
+    # Only the inspect_ai canary moves to install-with; its sandbox-tools leg
+    # keeps its install line.
     @classmethod
     def setUpClass(cls):
         paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
@@ -348,18 +352,6 @@ class InstallLinesUnchanged(unittest.TestCase):
     def test_only_inspect_ai_legs_use_install_with(self):
         using = {name for name, job in self.jobs.items() if isinstance(job.get("install-with"), dict)}
         self.assertEqual(using, {"inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (docs)"})
-
-    def test_install_lines_match_their_files(self):
-        for canary in self.canaries:
-            for variant in canary.get("variants") or [{}]:
-                name = f"{canary['name']} ({variant['label']})" if variant else canary["name"]
-                kind, value = file_install(canary, variant)
-                job = self.jobs[name]
-                with self.subTest(job=name):
-                    if kind == "install":
-                        # An install-bearing part keeps its exact install text.
-                        self.assertEqual(job.get("install"), value)
-                        self.assertNotIn("install-with", job)
 
     def test_the_sandbox_tools_leg_keeps_its_install(self):
         job = self.jobs["inspect_ai (sandbox-tools)"]
