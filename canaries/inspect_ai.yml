@@ -28,7 +28,6 @@ timeout-minutes: 60
 install-with:
   versions: unlocked
   project-uv-settings: ignore
-  actions-cache: none
   extras: dev
   also-install-unlocked: pytest-timeout
   also-install-without-deps: ./tests/test_package
@@ -70,7 +69,6 @@ variants:
     install-with:
       versions: unlocked
       project-uv-settings: ignore
-      actions-cache: none
       project-install: skip
       also-install-unlocked: .[doc]
     test: |

@@ -58,9 +58,14 @@ INSTALL_WITH_DEFAULTS = {
     "also-install-without-deps": "",
     "project-uv-settings": "apply",
     "package-format": "any",
-    "actions-cache": "read-write",
 }
 DERIVED_INSTALL_INPUTS = {"python-version": "python", "project-dir": "checkout dir"}
+# A canary never caches, so the install step hardcodes actions-cache none (like
+# the setup-uv step). The file can't set it, so the planner never fills it.
+STEP_SET_INSTALL_INPUTS = {"actions-cache"}
+# The install inputs that name packages to install, so each git+ URL in them is
+# held to the same @main pin as a plain `install` script.
+INSTALL_WITH_PACKAGE_INPUTS = ("also-install-unlocked", "also-install-without-deps")
 
 
 def valid(value):
@@ -84,7 +89,8 @@ def unpinned_git_url(script):
 
 def check_install_with(where, part):
     """Stop if a part sets both install and install-with, or if its install-with
-    is not a mapping of known action inputs with string values and a versions."""
+    is not a mapping of known action inputs with string values and a versions, or
+    carries a git+ URL not pinned to @main in a package input."""
     if "install" in part and "install-with" in part:
         sys.exit(f"{where}: set install or install-with, not both")
     iw = part.get("install-with")
@@ -95,12 +101,18 @@ def check_install_with(where, part):
     for name, value in iw.items():
         if name in DERIVED_INSTALL_INPUTS:
             sys.exit(f"{where}: install-with {name!r} comes from the canary's {DERIVED_INSTALL_INPUTS[name]}, not here")
+        if name in STEP_SET_INSTALL_INPUTS:
+            sys.exit(f"{where}: install-with {name!r} is fixed by the canary step (always none), not set here")
         if name not in INSTALL_WITH_DEFAULTS:
             sys.exit(f"{where}: install-with has unknown input {name!r}")
         if not isinstance(value, str):
             sys.exit(f"{where}: install-with {name!r} must be a string")
     if not iw.get("versions"):
         sys.exit(f"{where}: install-with needs versions (locked, hashed-requirements or unlocked)")
+    for name in INSTALL_WITH_PACKAGE_INPUTS:
+        bad = unpinned_git_url(iw.get(name))
+        if bad:
+            sys.exit(f"{where}: install-with {name} git+ URL {bad!r} must pin @main")
 
 
 def merge_variant(base, variant):
@@ -118,6 +130,8 @@ def full_install_with(job):
     """A job's install-with with every action input present: the file's value,
     else the action's default, plus python-version and project-dir derived from
     the part's python and checkout dir."""
+    if "python" not in job:
+        sys.exit(f"{job['name']}: install-with needs the part's python (for python-version)")
     iw = job["install-with"]
     full = {name: iw.get(name, default) for name, default in INSTALL_WITH_DEFAULTS.items()}
     full["python-version"] = job["python"]

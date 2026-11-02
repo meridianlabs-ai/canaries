@@ -61,20 +61,14 @@ def text(value):
     return json.dumps(value)
 
 
-# A shared-action call turns off setup-uv's Actions cache use with either the
-# literal none (the setup-uv step) or the canary matrix value, which the planner
-# fills with none for every install-with leg (the install step; a planner test
-# in test_canaries.py checks that).
-CACHE_OFF_VALUES = {"none", "${{ matrix.install-with.actions-cache }}"}
-
-
 def cache_is_denied(job):
     """True if a canary job denies the Actions cache token every write: the job
-    sets cache-mode none, and every shared-action call turns the cache off."""
+    sets cache-mode none, and every shared-action call sets the literal
+    actions-cache none (both the setup-uv and the install step fix it here)."""
     if job.get("cache-mode") != "none":
         return False
     for step in job.get("steps", []):
-        if uses(step) in SHARED_ACTIONS and (step.get("with") or {}).get("actions-cache") not in CACHE_OFF_VALUES:
+        if uses(step) in SHARED_ACTIONS and (step.get("with") or {}).get("actions-cache") != "none":
             return False
     return True
 
