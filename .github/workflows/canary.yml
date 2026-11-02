@@ -111,7 +111,7 @@ jobs:
       # unvetted release can't poison it. The step is pinned by SHA to the
       # actions branch head; step e re-pins it to a tag SHA with a # vX.Y.Z
       # comment.
-      - uses: meridianlabs-ai/actions/setup-uv@195af861d5f8cc87325bf6bd13e8cb4c6b691acc # epatey/install-python-dependencies
+      - uses: meridianlabs-ai/actions/setup-uv@49975ef545f849387c5857831fb4b10c8f8148c5 # epatey/install-python-dependencies
         with:
           python-version: ${{ matrix.python }}
           actions-cache: none
@@ -134,7 +134,7 @@ jobs:
       # lines run (e.g. the sandbox-tools leg, out of scope for the action).
       - name: Install the newest releases
         if: ${{ matrix.install-with.versions }}
-        uses: meridianlabs-ai/actions/install-python-dependencies@195af861d5f8cc87325bf6bd13e8cb4c6b691acc # epatey/install-python-dependencies
+        uses: meridianlabs-ai/actions/install-python-dependencies@49975ef545f849387c5857831fb4b10c8f8148c5 # epatey/install-python-dependencies
         with:
           versions: ${{ matrix.install-with.versions }}
           python-version: ${{ matrix.install-with.python-version }}

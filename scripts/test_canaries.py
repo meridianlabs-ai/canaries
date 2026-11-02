@@ -281,11 +281,13 @@ class InstallWithValidation(unittest.TestCase):
         self.assertIn("actions-cache", result.stderr)
 
     def test_missing_python_fails(self):
-        # full_install_with derives python-version from the part's python.
+        # full_install_with derives python-version from the part's python. The
+        # planner must stop with its own message, not crash with a traceback.
         entry = {"name": "x", "repo": "o/r", "ref": "main", "install-with": {"versions": "unlocked"}}
         result = plan([entry])
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("python", result.stderr)
+        self.assertIn("install-with needs the part's python", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_unpinned_git_url_in_a_package_input_fails(self):
         for name in ("also-install-unlocked", "also-install-without-deps"):
