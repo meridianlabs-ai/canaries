@@ -15,6 +15,7 @@ they prove nothing. Codespaces and Copilot agent organization secrets are not
 covered: they do not reach Actions runs.
 """
 
+import copy
 import json
 import os
 import re
@@ -24,6 +25,13 @@ import unittest
 
 WORKFLOWS = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, ".github", "workflows")
 SECRETS = re.compile(r"(?<![\w.-])secrets(?![\w-])")
+
+# The canary job installs through these shared actions; setup-uv is the only
+# step that reaches the Actions cache, so every call must set actions-cache none.
+SHARED_ACTIONS = {
+    "meridianlabs-ai/actions/setup-uv",
+    "meridianlabs-ai/actions/install-python-dependencies",
+}
 
 
 def load(name):
@@ -39,12 +47,61 @@ def load(name):
         return yaml.safe_load(f)
 
 
+def raw(name):
+    # The warning lives in comments, which yq and PyYAML drop, so read the text.
+    with open(os.path.join(WORKFLOWS, name)) as f:
+        return f.read()
+
+
 def uses(step):
     return step.get("uses", "").split("@")[0]
 
 
 def text(value):
     return json.dumps(value)
+
+
+# A shared-action call turns off setup-uv's Actions cache use with either the
+# literal none (the setup-uv step) or the canary matrix value, which the planner
+# fills with none for every install-with leg (the install step; a planner test
+# in test_canaries.py checks that).
+CACHE_OFF_VALUES = {"none", "${{ matrix.install-with.actions-cache }}"}
+
+
+def cache_is_denied(job):
+    """True if a canary job denies the Actions cache token every write: the job
+    sets cache-mode none, and every shared-action call turns the cache off."""
+    if job.get("cache-mode") != "none":
+        return False
+    for step in job.get("steps", []):
+        if uses(step) in SHARED_ACTIONS and (step.get("with") or {}).get("actions-cache") not in CACHE_OFF_VALUES:
+            return False
+    return True
+
+
+# Distinctive phrases of the job's warning comment (view 7 of the plan).
+WARNING_PHRASES = (
+    "unlocked install",
+    "newest release",
+    "can be malicious",
+    "Do not give this job a secret",
+    "deployment environment",
+    "write permissions",
+    "scripts/test_workflow.py fails",
+)
+
+
+def has_warning_comment(workflow_text):
+    """True if the workflow's comments carry the unlocked-install warning. The
+    comment text is normalized (the leading # and line breaks dropped) so a
+    phrase that wraps across lines still matches."""
+    words = []
+    for line in workflow_text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            words.append(stripped.lstrip("#").strip())
+    comments = " ".join(words)
+    return all(phrase in comments for phrase in WARNING_PHRASES)
 
 
 class CanaryWorkflow(unittest.TestCase):
@@ -77,16 +134,35 @@ class CanaryWorkflow(unittest.TestCase):
         self.assertIn(self.jobs["canary"].get("permissions", {"contents": "read"}), ({"contents": "read"}, {}))
 
     def test_canary_jobs_neither_restore_nor_save_a_cache(self):
+        # The job denies the Actions cache token, and every shared-action call
+        # turns off setup-uv's Actions cache use.
+        self.assertTrue(cache_is_denied(self.jobs["canary"]))
         for step in self.jobs["canary"]["steps"]:
             action = uses(step)
             inputs = step.get("with") or {}
             self.assertNotIn(action, {"actions/cache", "actions/cache/restore", "actions/cache/save"})
-            if action == "astral-sh/setup-uv":
-                self.assertIs(inputs.get("enable-cache"), False)
             if action in {"actions/setup-python", "actions/setup-node"}:
                 self.assertNotIn("cache", inputs)
             if action == "actions/setup-node":
                 self.assertIs(inputs.get("package-manager-cache"), False)
+
+    def test_the_cache_check_fails_without_job_cache_mode(self):
+        job = copy.deepcopy(self.jobs["canary"])
+        job.pop("cache-mode", None)
+        self.assertFalse(cache_is_denied(job))
+
+    def test_the_cache_check_fails_when_a_shared_action_uses_the_cache(self):
+        job = copy.deepcopy(self.jobs["canary"])
+        step = next(s for s in job["steps"] if uses(s) in SHARED_ACTIONS)
+        step.setdefault("with", {})["actions-cache"] = "read-write"
+        self.assertFalse(cache_is_denied(job))
+
+    def test_the_canary_job_carries_the_warning_comment(self):
+        self.assertTrue(has_warning_comment(raw("canary.yml")))
+
+    def test_the_warning_check_fails_without_the_comment(self):
+        no_comments = "\n".join(l for l in raw("canary.yml").splitlines() if not l.lstrip().startswith("#"))
+        self.assertFalse(has_warning_comment(no_comments))
 
     def test_canary_jobs_hand_nothing_to_other_jobs(self):
         self.assertNotIn("outputs", self.jobs["canary"])

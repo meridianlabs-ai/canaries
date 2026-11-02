@@ -235,6 +235,46 @@ class InstallGitUrls(unittest.TestCase):
         self.assertIn("@main", result.stderr)
 
 
+class InstallWithValidation(unittest.TestCase):
+    # install-with drives the shared install action, so the planner checks it:
+    # known inputs only, string values, a versions, and never with install.
+    BASE = {"name": "x", "repo": "o/r", "ref": "main", "python": "3.11"}
+
+    def test_valid_install_with_passes(self):
+        result = plan([{**self.BASE, "install-with": {"versions": "unlocked", "project-uv-settings": "ignore", "actions-cache": "none"}}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_install_and_install_with_together_fail(self):
+        result = plan([{**self.BASE, "install": "uv venv", "install-with": {"versions": "locked"}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not both", result.stderr)
+
+    def test_unknown_input_fails(self):
+        result = plan([{**self.BASE, "install-with": {"versions": "locked", "bogus": "x"}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown input", result.stderr)
+
+    def test_a_derived_input_fails(self):
+        # python-version and project-dir come from the part, not install-with.
+        result = plan([{**self.BASE, "install-with": {"versions": "locked", "python-version": "3.11"}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("python-version", result.stderr)
+
+    def test_non_string_value_fails(self):
+        result = plan([{**self.BASE, "install-with": {"versions": "locked", "extras": ["dev"]}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be a string", result.stderr)
+
+    def test_missing_versions_fails(self):
+        result = plan([{**self.BASE, "install-with": {"extras": "dev"}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("versions", result.stderr)
+
+    def test_install_with_in_a_variant_passes(self):
+        result = plan([{**self.BASE, "variants": [{"label": "a", "install-with": {"versions": "unlocked", "project-uv-settings": "ignore", "actions-cache": "none"}}]}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class RealCanaries(unittest.TestCase):
     def test_every_canary_runs_static_analysis(self):
         paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
@@ -254,6 +294,61 @@ class RealCanaries(unittest.TestCase):
         self.assertTrue(paths, "no canaries found")
         result = plan([load(path) for path in paths])
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+def file_install(canary, variant):
+    """(kind, value) for an effective job: the variant's own install or
+    install-with wins; else it inherits the canary's. kind is 'install',
+    'install-with' or None, mirroring scripts/plan.py's exclusivity."""
+    for part in (variant, canary):
+        if "install" in part:
+            return "install", part["install"]
+        if "install-with" in part:
+            return "install-with", part["install-with"]
+    return None, None
+
+
+class InstallLinesUnchanged(unittest.TestCase):
+    # Only the inspect_ai canary moves to install-with; every other canary and
+    # the sandbox-tools leg keep their install lines, unchanged by the planner.
+    @classmethod
+    def setUpClass(cls):
+        paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
+        cls.canaries = [load(path) for path in paths]
+        result = plan(cls.canaries)
+        assert result.returncode == 0, result.stderr
+        cls.jobs = {job["name"]: job for job in json.loads(result.stdout)["include"]}
+
+    def test_only_inspect_ai_legs_use_install_with(self):
+        using = {name for name, job in self.jobs.items() if isinstance(job.get("install-with"), dict)}
+        self.assertEqual(using, {"inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (docs)"})
+
+    def test_install_lines_match_their_files(self):
+        for canary in self.canaries:
+            for variant in canary.get("variants") or [{}]:
+                name = f"{canary['name']} ({variant['label']})" if variant else canary["name"]
+                kind, value = file_install(canary, variant)
+                job = self.jobs[name]
+                with self.subTest(job=name):
+                    if kind == "install":
+                        # An install-bearing part keeps its exact install text.
+                        self.assertEqual(job.get("install"), value)
+                        self.assertNotIn("install-with", job)
+
+    def test_the_sandbox_tools_leg_keeps_its_install(self):
+        job = self.jobs["inspect_ai (sandbox-tools)"]
+        self.assertNotIn("install-with", job)
+        self.assertIn("inspect_sandbox_tools", job["install"])
+
+    def test_install_with_legs_are_unlocked_and_cacheless(self):
+        # A canary install is unlocked and must never touch the Actions cache;
+        # the canary job passes install-with.actions-cache to the shared action.
+        for name in ("inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (docs)"):
+            with self.subTest(job=name):
+                install_with = self.jobs[name]["install-with"]
+                self.assertEqual(install_with["versions"], "unlocked")
+                self.assertEqual(install_with["actions-cache"], "none")
+                self.assertEqual(install_with["project-uv-settings"], "ignore")
 
 
 if __name__ == "__main__":

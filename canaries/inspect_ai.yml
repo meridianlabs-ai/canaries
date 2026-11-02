@@ -16,16 +16,22 @@ ref: main
 cadence: 2h
 python: "3.11"
 timeout-minutes: 60
-# The slow suite's environment, for asyncio and trio.
-# Each install passes both flags. --exclude-newer false alone keeps the repo's
-# per-package cooldowns ([tool.uv.exclude-newer-package]); --no-config drops
-# them. --exclude-newer false also overrides UV_EXCLUDE_NEWER if a runner sets
-# it; --no-config doesn't.
-install: |
-  uv venv
-  uv pip install --no-config --exclude-newer false -e ".[dev]" pytest-timeout
-  # Pre-installed so ensure_test_package_installed() doesn't install it mid-run.
-  uv pip install --no-config --exclude-newer false --no-deps ./tests/test_package
+# The slow suite's environment, for asyncio and trio. The shared install action
+# does the install (see README.md, "install-with"): an editable install of the
+# dev extra, with pytest-timeout in the same resolution, then the test package
+# with --no-deps so ensure_test_package_installed() doesn't install it mid-run.
+# versions: unlocked makes each install
+# `uv pip install --no-config --exclude-newer false`. --exclude-newer false
+# clears the cooldown; --no-config (from project-uv-settings: ignore) also drops
+# the repo's per-package cooldowns ([tool.uv.exclude-newer-package]), and
+# --exclude-newer false also overrides UV_EXCLUDE_NEWER if a runner sets it.
+install-with:
+  versions: unlocked
+  project-uv-settings: ignore
+  actions-cache: none
+  extras: dev
+  also-install-unlocked: pytest-timeout
+  also-install-without-deps: ./tests/test_package
 variants:
   - label: asyncio
     test: |
@@ -48,6 +54,9 @@ variants:
         -n logical --timeout=1500 --timeout-method=thread
   - label: sandbox-tools
     timeout-minutes: 15
+    # The sandbox tools package uses a very different toolchain, so it keeps its
+    # own install lines (out of scope for the shared action); only the setup-uv
+    # step is shared. The `run: ${{ matrix.install }}` step installs it.
     install: |
       uv venv
       uv pip install --no-config --exclude-newer false "./src/inspect_sandbox_tools[dev]"
@@ -55,8 +64,14 @@ variants:
       uv run --no-sync pytest src/inspect_sandbox_tools/tests/ -ra
   - label: docs
     timeout-minutes: 30
-    install: |
-      uv venv
-      uv pip install --no-config --exclude-newer false ".[doc]"
+    # The docs site render installs the project (not editable) with its doc
+    # extra, at the newest releases. versions: unlocked makes it
+    # `uv pip install --no-config --exclude-newer false ".[doc]"`.
+    install-with:
+      versions: unlocked
+      project-uv-settings: ignore
+      actions-cache: none
+      project-install: skip
+      also-install-unlocked: .[doc]
     test: |
       uv run --no-sync quarto render docs
