@@ -36,8 +36,36 @@ entries = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 # exactly one canary; scripts/notify.py parses job names with the same pattern.
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 GIT_URL = re.compile(r"git\+\S+")
-VARIANT_FIELDS = {"label", "python", "install", "test", "runs-on", "node", "timeout-minutes"}
+VARIANT_FIELDS = {"label", "python", "install", "install-with", "test", "runs-on", "node", "timeout-minutes"}
 RULE = "a string of letters, digits, '.', '_' or '-' (quote it if YAML would read a number or boolean)"
+
+# A part installs with a plain `install` script or with `install-with`, a
+# mapping that drives meridianlabs-ai/actions/install-python-dependencies. The
+# canary file sets a subset of the action's inputs; the planner fills every
+# other input with the action's default, so a matrix value never arrives empty
+# in place of a default. versions has no default (required). python-version and
+# project-dir are not set here: the planner takes them from the part's `python`
+# and its checkout `dir`.
+INSTALL_WITH_DEFAULTS = {
+    "versions": None,
+    "environment-dir": "",
+    "project-install": "editable",
+    "extras": "",
+    "default-dependency-groups": "include",
+    "requirements-file": "",
+    "script": "",
+    "also-install-unlocked": "",
+    "also-install-without-deps": "",
+    "project-uv-settings": "apply",
+    "package-format": "any",
+}
+DERIVED_INSTALL_INPUTS = {"python-version": "python", "project-dir": "checkout dir"}
+# A canary never caches, so the install step hardcodes actions-cache none (like
+# the setup-uv step). The file can't set it, so the planner never fills it.
+STEP_SET_INSTALL_INPUTS = {"actions-cache"}
+# The install inputs that name packages to install, so each git+ URL in them is
+# held to the same @main pin as a plain `install` script.
+INSTALL_WITH_PACKAGE_INPUTS = ("also-install-unlocked", "also-install-without-deps")
 
 
 def valid(value):
@@ -59,12 +87,69 @@ def unpinned_git_url(script):
     return next((url for url in GIT_URL.findall(script or "") if not pinned_to_main(url)), None)
 
 
+def check_install_with(where, part):
+    """Stop if a part sets both install and install-with, or if its install-with
+    is not a mapping of known action inputs with string values and a versions, or
+    carries a git+ URL not pinned to @main in a package input."""
+    if "install" in part and "install-with" in part:
+        sys.exit(f"{where}: set install or install-with, not both")
+    iw = part.get("install-with")
+    if iw is None:
+        return
+    if not isinstance(iw, dict):
+        sys.exit(f"{where}: install-with must be a mapping of install-python-dependencies inputs")
+    for name, value in iw.items():
+        if name in DERIVED_INSTALL_INPUTS:
+            sys.exit(f"{where}: install-with {name!r} comes from the canary's {DERIVED_INSTALL_INPUTS[name]}, not here")
+        if name in STEP_SET_INSTALL_INPUTS:
+            sys.exit(f"{where}: install-with {name!r} is fixed by the canary step (always none), not set here")
+        if name not in INSTALL_WITH_DEFAULTS:
+            sys.exit(f"{where}: install-with has unknown input {name!r}")
+        if not isinstance(value, str):
+            sys.exit(f"{where}: install-with {name!r} must be a string")
+    if not iw.get("versions"):
+        sys.exit(f"{where}: install-with needs versions (locked, hashed-requirements or unlocked)")
+    for name in INSTALL_WITH_PACKAGE_INPUTS:
+        bad = unpinned_git_url(iw.get(name))
+        if bad:
+            sys.exit(f"{where}: install-with {name} git+ URL {bad!r} must pin @main")
+
+
+def merge_variant(base, variant):
+    """base with variant's keys over it, keeping install and install-with
+    exclusive: whichever one the variant sets replaces the other it inherits."""
+    merged = base | variant
+    if "install" in variant and "install-with" not in variant:
+        merged.pop("install-with", None)
+    if "install-with" in variant and "install" not in variant:
+        merged.pop("install", None)
+    return merged
+
+
+def full_install_with(job):
+    """A job's install-with with every action input present: the file's value,
+    else the action's default, plus python-version and project-dir derived from
+    the part's python and checkout dir."""
+    if "python" not in job:
+        sys.exit(f"{job['name']}: install-with needs the part's python (for python-version)")
+    iw = job["install-with"]
+    full = {name: iw.get(name, default) for name, default in INSTALL_WITH_DEFAULTS.items()}
+    full["python-version"] = job["python"]
+    full["project-dir"] = job["dir"]
+    return full
+
+
 def jobs(canary):
     """One matrix entry per variant (or one for the canary), with its job name."""
     base = {k: v for k, v in canary.items() if k != "variants"} | {"canary": canary["name"]}
     if "variants" not in canary:
-        return [base]
-    return [base | v | {"name": f"{canary['name']} ({v['label']})"} for v in canary["variants"]]
+        parts = [base]
+    else:
+        parts = [merge_variant(base, v) | {"name": f"{canary['name']} ({v['label']})"} for v in canary["variants"]]
+    for part in parts:
+        if "install-with" in part:
+            part["install-with"] = full_install_with(part)
+    return parts
 
 
 for e in entries:
@@ -77,6 +162,7 @@ for e in entries:
     bad = unpinned_git_url(e.get("install"))
     if bad:
         sys.exit(f"{e['name']}: install git+ URL {bad!r} must pin @main")
+    check_install_with(e["name"], e)
     variants = e.get("variants")
     if variants is None:
         continue
@@ -91,6 +177,13 @@ for e in entries:
         bad = unpinned_git_url(v.get("install"))
         if bad:
             sys.exit(f"{e['name']} ({v['label']}): install git+ URL {bad!r} must pin @main")
+        check_install_with(f"{e['name']} ({v['label']})", v)
+
+# Check each repository out under its own name, as its own CI does: some test
+# suites expect the checkout directory to be named after the project. jobs()
+# reads this for an install-with part's project-dir, so set it before jobs runs.
+for e in entries:
+    e["dir"] = e["repo"].split("/")[-1]
 
 names = [e["name"] for e in entries]
 if len(names) != len(set(names)):
@@ -99,11 +192,6 @@ job_names = [job["name"] for e in entries for job in jobs(e)]
 duplicates = sorted({n for n in job_names if job_names.count(n) > 1})
 if duplicates:
     sys.exit(f"duplicate job names {', '.join(duplicates)}: variant labels must be unique within a canary")
-
-# Check each repository out under its own name, as its own CI does: some test
-# suites expect the checkout directory to be named after the project.
-for e in entries:
-    e["dir"] = e["repo"].split("/")[-1]
 
 def still_red(names):
     """Those of `names` whose latest result in the last RECHECK_RUNS scheduled

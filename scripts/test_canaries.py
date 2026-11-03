@@ -235,6 +235,88 @@ class InstallGitUrls(unittest.TestCase):
         self.assertIn("@main", result.stderr)
 
 
+class InstallWithValidation(unittest.TestCase):
+    # install-with drives the shared install action, so the planner checks it:
+    # known inputs only, string values, a versions, and never with install.
+    BASE = {"name": "x", "repo": "o/r", "ref": "main", "python": "3.11"}
+
+    def test_valid_install_with_passes(self):
+        result = plan([{**self.BASE, "install-with": {"versions": "unlocked", "project-uv-settings": "ignore"}}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_install_and_install_with_together_fail(self):
+        result = plan([{**self.BASE, "install": "uv venv", "install-with": {"versions": "locked"}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not both", result.stderr)
+
+    def test_unknown_input_fails(self):
+        result = plan([{**self.BASE, "install-with": {"versions": "locked", "bogus": "x"}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown input", result.stderr)
+
+    def test_a_derived_input_fails(self):
+        # python-version and project-dir come from the part, not install-with.
+        result = plan([{**self.BASE, "install-with": {"versions": "locked", "python-version": "3.11"}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("python-version", result.stderr)
+
+    def test_non_string_value_fails(self):
+        result = plan([{**self.BASE, "install-with": {"versions": "locked", "extras": ["dev"]}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be a string", result.stderr)
+
+    def test_missing_versions_fails(self):
+        result = plan([{**self.BASE, "install-with": {"extras": "dev"}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("versions", result.stderr)
+
+    def test_install_with_in_a_variant_passes(self):
+        result = plan([{**self.BASE, "variants": [{"label": "a", "install-with": {"versions": "unlocked", "project-uv-settings": "ignore"}}]}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_variant_install_with_replaces_the_top_level_install(self):
+        entry = {**self.BASE, "install": "uv venv", "variants": [{"label": "a", "install-with": {"versions": "unlocked"}}]}
+        result = plan([entry])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        job = json.loads(result.stdout)["include"][0]
+        self.assertEqual(job["install-with"]["versions"], "unlocked")
+        self.assertNotIn("install", job)
+
+    def test_variant_install_replaces_the_top_level_install_with(self):
+        entry = {**self.BASE, "install-with": {"versions": "unlocked"}, "variants": [{"label": "a", "install": "uv venv"}]}
+        result = plan([entry])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        job = json.loads(result.stdout)["include"][0]
+        self.assertEqual(job["install"], "uv venv")
+        self.assertNotIn("install-with", job)
+
+    def test_actions_cache_fails(self):
+        # The canary step always passes actions-cache none; the file can't set it.
+        result = plan([{**self.BASE, "install-with": {"versions": "unlocked", "actions-cache": "read-write"}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("actions-cache", result.stderr)
+
+    def test_missing_python_fails(self):
+        # full_install_with derives python-version from the part's python. The
+        # planner must stop with its own message, not crash with a traceback.
+        entry = {"name": "x", "repo": "o/r", "ref": "main", "install-with": {"versions": "unlocked"}}
+        result = plan([entry])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("install-with needs the part's python", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_unpinned_git_url_in_a_package_input_fails(self):
+        for name in ("also-install-unlocked", "also-install-without-deps"):
+            with self.subTest(input=name):
+                result = plan([{**self.BASE, "install-with": {"versions": "unlocked", name: "git+https://github.com/o/r.git"}}])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("@main", result.stderr)
+
+    def test_git_url_pinned_to_main_in_a_package_input_passes(self):
+        result = plan([{**self.BASE, "install-with": {"versions": "unlocked", "also-install-unlocked": "git+https://github.com/o/r.git@main"}}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class RealCanaries(unittest.TestCase):
     def test_every_canary_runs_static_analysis(self):
         paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
@@ -254,6 +336,38 @@ class RealCanaries(unittest.TestCase):
         self.assertTrue(paths, "no canaries found")
         result = plan([load(path) for path in paths])
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class RealInstallWithLegs(unittest.TestCase):
+    # Only the inspect_ai asyncio, trio and docs legs use install-with; the
+    # sandbox-tools leg uses install.
+    @classmethod
+    def setUpClass(cls):
+        paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
+        cls.canaries = [load(path) for path in paths]
+        result = plan(cls.canaries)
+        assert result.returncode == 0, result.stderr
+        cls.jobs = {job["name"]: job for job in json.loads(result.stdout)["include"]}
+
+    def test_only_inspect_ai_legs_use_install_with(self):
+        using = {name for name, job in self.jobs.items() if isinstance(job.get("install-with"), dict)}
+        self.assertEqual(using, {"inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (docs)"})
+
+    def test_the_sandbox_tools_leg_keeps_its_install(self):
+        job = self.jobs["inspect_ai (sandbox-tools)"]
+        self.assertNotIn("install-with", job)
+        self.assertIn("inspect_sandbox_tools", job["install"])
+
+    def test_install_with_legs_are_unlocked(self):
+        # A canary install is unlocked and ignores the repo's uv settings. It
+        # never touches the Actions cache, but the canary step fixes that (not
+        # install-with); scripts/test_workflow.py checks the step passes none.
+        for name in ("inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (docs)"):
+            with self.subTest(job=name):
+                install_with = self.jobs[name]["install-with"]
+                self.assertEqual(install_with["versions"], "unlocked")
+                self.assertNotIn("actions-cache", install_with)
+                self.assertEqual(install_with["project-uv-settings"], "ignore")
 
 
 if __name__ == "__main__":

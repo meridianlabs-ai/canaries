@@ -72,11 +72,19 @@ jobs:
   # Installs and runs unvetted releases. Holds no secrets, saves and restores
   # no cache, and produces nothing any other job consumes. One job per canary,
   # or per variant (`<canary> (<label>)`), all in parallel.
+  #
+  # WARNING: this job runs an unlocked install. It takes the newest release of
+  # each dependency, and such code can be malicious. Do not give this job a
+  # secret, a deployment environment or a job token with write permissions.
+  # scripts/test_workflow.py fails if the job gets one.
   canary:
     needs: plan
     if: ${{ needs.plan.outputs.count != '0' }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runs-on || 'ubuntu-latest' }}
+    # Deny the Actions cache token any read or write, so an unvetted release can't
+    # poison the Actions cache. The shared actions also pass actions-cache: none.
+    cache-mode: none
     timeout-minutes: ${{ matrix.timeout-minutes }}
     strategy:
       fail-fast: false
@@ -98,11 +106,13 @@ jobs:
           fetch-tags: true
           filter: "blob:none"
 
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      # The shared setup-uv holds the one uv pin (0.13.5) for all Meridian
+      # callers. actions-cache: none keeps a canary off the Actions cache, so an
+      # unvetted release can't poison it.
+      - uses: meridianlabs-ai/actions/setup-uv@2e29d39eac45f500a64f443ec31aa6fb874f9ddc # main, 2026-11-02
         with:
-          version: 0.13.5
           python-version: ${{ matrix.python }}
-          enable-cache: false
+          actions-cache: none
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: ${{ matrix.node }}
@@ -116,7 +126,33 @@ jobs:
         run: |
           echo "canary-tested: ${{ matrix.repo }}@$(git rev-parse HEAD)"
 
+      # A part installs one of two ways. With install-with, the shared action
+      # installs (the planner fills every input, so none arrives empty); its
+      # setup-uv call reuses the one above. Otherwise the part's own install
+      # lines run (e.g. the sandbox-tools leg, out of scope for the action).
       - name: Install the newest releases
+        if: ${{ matrix.install-with.versions }}
+        uses: meridianlabs-ai/actions/install-python-dependencies@2e29d39eac45f500a64f443ec31aa6fb874f9ddc # main, 2026-11-02
+        with:
+          versions: ${{ matrix.install-with.versions }}
+          python-version: ${{ matrix.install-with.python-version }}
+          project-dir: ${{ matrix.install-with.project-dir }}
+          environment-dir: ${{ matrix.install-with.environment-dir }}
+          project-install: ${{ matrix.install-with.project-install }}
+          extras: ${{ matrix.install-with.extras }}
+          default-dependency-groups: ${{ matrix.install-with.default-dependency-groups }}
+          requirements-file: ${{ matrix.install-with.requirements-file }}
+          script: ${{ matrix.install-with.script }}
+          also-install-unlocked: ${{ matrix.install-with.also-install-unlocked }}
+          also-install-without-deps: ${{ matrix.install-with.also-install-without-deps }}
+          project-uv-settings: ${{ matrix.install-with.project-uv-settings }}
+          package-format: ${{ matrix.install-with.package-format }}
+          # A canary never caches, so this is fixed here (like the setup-uv step
+          # above), not taken from the matrix.
+          actions-cache: none
+
+      - name: Install the newest releases (own lines)
+        if: ${{ matrix.install }}
         run: ${{ matrix.install }}
 
       # One `canary-installed: <name> <version>` line per package, which

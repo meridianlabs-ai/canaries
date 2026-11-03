@@ -66,9 +66,11 @@ test: |                     # every static analysis tool CI runs, plus the tests
 
 `--exclude-newer false` clears the global cooldown. A repository with a `[tool.uv.exclude-newer-package]` table also needs `--no-config`, which makes uv ignore all uv settings of the repository. These include `[tool.uv.sources]` and indexes, so make sure that the install does not need them.
 
+Instead of `install` lines, a part may set `install-with`: a mapping that drives the shared [`meridianlabs-ai/actions/install-python-dependencies`](https://github.com/meridianlabs-ai/actions) action, which the canary workflow runs in place of the `install` script. Set only the inputs you need (`versions` is required; for a canary it is `unlocked`, with `project-uv-settings: ignore`); the planner fills every other input with the action's default, and sets `python-version` from the part's `python` and `project-dir` from its checkout directory. You can't set `actions-cache`: a canary never caches, so the workflow step always passes `none`. A part uses `install` or `install-with`, never both, and a variant's own choice replaces the one it would inherit. Only the inspect_ai canary uses it today; the others keep their `install` lines.
+
 Optional fields: `runs-on` (a runner label; default `ubuntu-latest`), `node` (a Node.js version to set up before installing), and `static-analysis-exempt` (a reason string, for a canary whose repository has no type checker or eslint to run; a top-level field, not allowed in a variant). Set environment variables inside `install` or `test` with `export`.
 
-To split a canary into parts that run in parallel, add `variants`: each has a short `label` and may override `python`, `install`, `test`, `runs-on`, `node` or `timeout-minutes`; the rest comes from the top level. Each part is its own job, named `<canary> (<label>)`, but the canary still alerts once: it is red when any part fails, and the alert names the failing parts.
+To split a canary into parts that run in parallel, add `variants`: each has a short `label` and may override `python`, `install`, `install-with`, `test`, `runs-on`, `node` or `timeout-minutes`; the rest comes from the top level. Each part is its own job, named `<canary> (<label>)`, but the canary still alerts once: it is red when any part fails, and the alert names the failing parts.
 
 ```yaml
 variants:
