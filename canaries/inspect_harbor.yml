@@ -14,10 +14,16 @@ cadence: nightly
 python: "3.14"
 timeout-minutes: 30
 # The parity part installs harbor beside inspect_harbor, without the dev
-# closure. The dev part overrides this with the dev group.
-install: |
-  uv venv
-  uv pip install --exclude-newer false harbor pytest pytest-asyncio pyyaml -e .
+# closure, with the shared install action (see README.md, "install-with"). The
+# dev part overrides this with the dev group.
+install-with:
+  versions: unlocked
+  project-uv-settings: ignore
+  also-install-unlocked: |
+    harbor
+    pytest
+    pytest-asyncio
+    pyyaml
 variants:
   - label: parity
     test: |
@@ -29,6 +35,7 @@ variants:
       # -rs names what went missing.
       echo "::group::Parity"; uv run --no-sync pytest tests/manual/test_harbor_parity.py -q -rs -p no:cacheprovider; echo "::endgroup::"
   - label: dev
+    # The action has no dependency-group input for unlocked installs.
     install: |
       uv venv
       uv pip install --exclude-newer false -e . --group dev

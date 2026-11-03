@@ -8,13 +8,20 @@ ref: main
 cadence: nightly
 python: "3.14"
 timeout-minutes: 30
-install: |
+# The shared install action does the install (see README.md, "install-with"):
+# an editable install of the dev extra, like scout's own CI. --no-config (from
+# project-uv-settings: ignore) drops the repo's per-package cooldowns, and
+# --exclude-newer false (from versions: unlocked) clears the cooldown. The
+# workflow step sets UV_NO_SOURCES, so inspect-ai comes from its newest release,
+# not the git source in pyproject.
+install-with:
+  versions: unlocked
+  project-uv-settings: ignore
+  extras: dev
+test: |
   # scout's Python jobs check out without the ts-mono submodule; with it, mypy
   # would also check ts-mono's Python fixtures.
   git submodule deinit --all --force
-  uv venv
-  uv pip install --exclude-newer false ".[dev]"
-test: |
   # Every check runs; the step fails if any did.
   status=0
   echo "::group::pytest"; uv run --no-sync pytest -ra || status=1; echo "::endgroup::"

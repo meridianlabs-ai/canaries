@@ -8,13 +8,18 @@ ref: main
 cadence: nightly
 python: "3.14"
 timeout-minutes: 60
-install: |
-  uv venv
-  # One command, so scout's inspect-ai requirement resolves to the git inspect_ai.
-  uv pip install --exclude-newer false \
-    git+https://github.com/UKGovernmentBEIS/inspect_ai.git@main \
+# The shared install action does the install (see README.md, "install-with"):
+# an editable install of the dev extra, with inspect_ai and inspect_scout main
+# in the same resolution, so scout's inspect-ai requirement resolves to the git
+# inspect_ai. The workflow step sets UV_NO_SOURCES, so uv ignores scout's git
+# source for inspect-ai, which would conflict with the git URL here.
+install-with:
+  versions: unlocked
+  project-uv-settings: ignore
+  extras: dev
+  also-install-unlocked: |
+    git+https://github.com/UKGovernmentBEIS/inspect_ai.git@main
     git+https://github.com/meridianlabs-ai/inspect_scout.git@main
-  uv pip install --exclude-newer false -e ".[dev]"
 test: |
   # Every check runs; the step fails if any did.
   status=0

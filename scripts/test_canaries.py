@@ -339,8 +339,9 @@ class RealCanaries(unittest.TestCase):
 
 
 class RealInstallWithLegs(unittest.TestCase):
-    # Only the inspect_ai asyncio, trio and docs legs use install-with; the
-    # sandbox-tools leg uses install.
+    # Only these legs use install-with: inspect_scout, inspect_sentinel,
+    # inspect_swe, inspect_harbor parity, and all four inspect_ai legs. The
+    # inspect_harbor dev leg uses install.
     @classmethod
     def setUpClass(cls):
         paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
@@ -349,20 +350,20 @@ class RealInstallWithLegs(unittest.TestCase):
         assert result.returncode == 0, result.stderr
         cls.jobs = {job["name"]: job for job in json.loads(result.stdout)["include"]}
 
-    def test_only_inspect_ai_legs_use_install_with(self):
+    def test_only_these_legs_use_install_with(self):
         using = {name for name, job in self.jobs.items() if isinstance(job.get("install-with"), dict)}
-        self.assertEqual(using, {"inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (docs)"})
+        self.assertEqual(using, {"inspect_scout", "inspect_sentinel", "inspect_swe", "inspect_harbor (parity)", "inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (sandbox-tools)", "inspect_ai (docs)"})
 
-    def test_the_sandbox_tools_leg_keeps_its_install(self):
-        job = self.jobs["inspect_ai (sandbox-tools)"]
+    def test_the_harbor_dev_leg_keeps_its_install(self):
+        job = self.jobs["inspect_harbor (dev)"]
         self.assertNotIn("install-with", job)
-        self.assertIn("inspect_sandbox_tools", job["install"])
+        self.assertIn("--group dev", job["install"])
 
     def test_install_with_legs_are_unlocked(self):
         # A canary install is unlocked and ignores the repo's uv settings. It
         # never touches the Actions cache, but the canary step fixes that (not
         # install-with); scripts/test_workflow.py checks the step passes none.
-        for name in ("inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (docs)"):
+        for name in ("inspect_scout", "inspect_sentinel", "inspect_swe", "inspect_harbor (parity)", "inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (sandbox-tools)", "inspect_ai (docs)"):
             with self.subTest(job=name):
                 install_with = self.jobs[name]["install-with"]
                 self.assertEqual(install_with["versions"], "unlocked")

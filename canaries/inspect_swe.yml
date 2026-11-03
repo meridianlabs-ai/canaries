@@ -8,11 +8,19 @@ ref: main
 cadence: nightly
 python: "3.11"
 timeout-minutes: 120
-install: |
-  uv venv
-  # pytest-timeout and pytest-xdist aren't in the dev extra; google-genai lets
-  # inspect_ai's Google provider import, so the gemini_cli tests skip cleanly.
-  uv pip install --exclude-newer false -e ".[dev]" pytest-timeout pytest-xdist google-genai
+# The shared install action does the install (see README.md, "install-with"):
+# an editable install of the dev extra, with the packages below in the same
+# resolution. pytest-timeout and pytest-xdist aren't in the dev extra;
+# google-genai lets inspect_ai's Google provider import, so the gemini_cli tests
+# skip cleanly.
+install-with:
+  versions: unlocked
+  project-uv-settings: ignore
+  extras: dev
+  also-install-unlocked: |
+    pytest-timeout
+    pytest-xdist
+    google-genai
 test: |
   # Plain eval output keeps rich panels and progress bars out of the log.
   export INSPECT_DISPLAY=plain
