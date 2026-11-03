@@ -339,8 +339,8 @@ class RealCanaries(unittest.TestCase):
 
 
 class RealInstallWithLegs(unittest.TestCase):
-    # Only the inspect_ai asyncio, trio and docs legs use install-with; the
-    # sandbox-tools leg uses install.
+    # Only inspect_scout and the inspect_ai asyncio, trio and docs legs use
+    # install-with; the sandbox-tools leg uses install.
     @classmethod
     def setUpClass(cls):
         paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
@@ -349,9 +349,9 @@ class RealInstallWithLegs(unittest.TestCase):
         assert result.returncode == 0, result.stderr
         cls.jobs = {job["name"]: job for job in json.loads(result.stdout)["include"]}
 
-    def test_only_inspect_ai_legs_use_install_with(self):
+    def test_only_these_legs_use_install_with(self):
         using = {name for name, job in self.jobs.items() if isinstance(job.get("install-with"), dict)}
-        self.assertEqual(using, {"inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (docs)"})
+        self.assertEqual(using, {"inspect_scout", "inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (docs)"})
 
     def test_the_sandbox_tools_leg_keeps_its_install(self):
         job = self.jobs["inspect_ai (sandbox-tools)"]
@@ -362,7 +362,7 @@ class RealInstallWithLegs(unittest.TestCase):
         # A canary install is unlocked and ignores the repo's uv settings. It
         # never touches the Actions cache, but the canary step fixes that (not
         # install-with); scripts/test_workflow.py checks the step passes none.
-        for name in ("inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (docs)"):
+        for name in ("inspect_scout", "inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (docs)"):
             with self.subTest(job=name):
                 install_with = self.jobs[name]["install-with"]
                 self.assertEqual(install_with["versions"], "unlocked")
