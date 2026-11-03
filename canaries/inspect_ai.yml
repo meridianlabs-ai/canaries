@@ -53,8 +53,8 @@ variants:
         -n logical --timeout=1500 --timeout-method=thread
   - label: sandbox-tools
     timeout-minutes: 15
-    # The sandbox tools package is not the project, so the project install is
-    # skipped and the package path is in also-install-unlocked.
+    # The sandbox tools package is not the project. project-install: skip stops
+    # the project install, and also-install-unlocked installs the package.
     install-with:
       versions: unlocked
       project-uv-settings: ignore
