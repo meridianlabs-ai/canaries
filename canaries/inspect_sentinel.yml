@@ -11,9 +11,7 @@ timeout-minutes: 60
 # The shared install action does the install (see README.md, "install-with"):
 # an editable install of the dev extra, with inspect_ai and inspect_scout main
 # in the same resolution, so scout's inspect-ai requirement resolves to the git
-# inspect_ai. versions: unlocked makes it
-# `uv pip install --no-config --exclude-newer false`. The workflow step sets
-# UV_NO_SOURCES, so uv ignores scout's git source for inspect-ai, which would
+# inspect_ai. The workflow step sets UV_NO_SOURCES, so uv ignores scout's git source for inspect-ai, which would
 # conflict with the git URL here.
 install-with:
   versions: unlocked

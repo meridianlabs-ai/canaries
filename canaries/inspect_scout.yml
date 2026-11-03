@@ -9,9 +9,10 @@ cadence: nightly
 python: "3.14"
 timeout-minutes: 30
 # The shared install action does the install (see README.md, "install-with"):
-# an editable install of the dev extra, like scout's own CI. versions: unlocked
-# makes it `uv pip install --no-config --exclude-newer false`, which also drops
-# the repo's per-package cooldowns. The workflow step sets UV_NO_SOURCES, so
+# an editable install of the dev extra, like scout's own CI. --no-config (from
+# project-uv-settings: ignore) drops the repo's per-package cooldowns, and
+# --exclude-newer false (from versions: unlocked) clears the cooldown. The
+# workflow step sets UV_NO_SOURCES, so
 # inspect-ai comes from its newest release, not the git source in pyproject.
 install-with:
   versions: unlocked

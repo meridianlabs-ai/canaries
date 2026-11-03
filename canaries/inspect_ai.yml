@@ -53,12 +53,13 @@ variants:
         -n logical --timeout=1500 --timeout-method=thread
   - label: sandbox-tools
     timeout-minutes: 15
-    # The sandbox tools package uses a very different toolchain, so it keeps its
-    # own install lines (out of scope for the shared action); only the setup-uv
-    # step is shared. The `run: ${{ matrix.install }}` step installs it.
-    install: |
-      uv venv
-      uv pip install --no-config --exclude-newer false "./src/inspect_sandbox_tools[dev]"
+    # The sandbox tools package is not the project, so the project install is
+    # skipped and the package path is in also-install-unlocked.
+    install-with:
+      versions: unlocked
+      project-uv-settings: ignore
+      project-install: skip
+      also-install-unlocked: ./src/inspect_sandbox_tools[dev]
     test: |
       uv run --no-sync pytest src/inspect_sandbox_tools/tests/ -ra
   - label: docs
