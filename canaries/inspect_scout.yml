@@ -12,8 +12,8 @@ timeout-minutes: 30
 # an editable install of the dev extra, like scout's own CI. --no-config (from
 # project-uv-settings: ignore) drops the repo's per-package cooldowns, and
 # --exclude-newer false (from versions: unlocked) clears the cooldown. The
-# workflow step sets UV_NO_SOURCES, so
-# inspect-ai comes from its newest release, not the git source in pyproject.
+# workflow step sets UV_NO_SOURCES, so inspect-ai comes from its newest release,
+# not the git source in pyproject.
 install-with:
   versions: unlocked
   project-uv-settings: ignore
