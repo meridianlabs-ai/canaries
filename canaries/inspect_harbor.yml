@@ -15,8 +15,8 @@ python: "3.14"
 timeout-minutes: 30
 # The parity part installs harbor beside inspect_harbor, without the dev
 # closure, with the shared install action (see README.md, "install-with"). The
-# dev part replaces this with its own install-with (the dev extra), so it does
-# not get harbor and the other packages below.
+# dev part's install-with replaces this one, so it installs the dev extra and
+# does not add harbor or the also-install-unlocked list.
 install-with:
   versions: unlocked
   project-uv-settings: ignore

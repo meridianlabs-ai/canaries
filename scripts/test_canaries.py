@@ -339,9 +339,7 @@ class RealCanaries(unittest.TestCase):
 
 
 class RealInstallWithLegs(unittest.TestCase):
-    # Only these legs use install-with. The others keep install: inspect_ranges
-    # also installs toolchains, inspect_steward needs its git source and
-    # override-dependencies, and the rest give their reasons in README.md.
+    # Only these legs use install-with; README.md gives the reasons for the others.
     LEGS = {
         "inspect_scout",
         "inspect_sentinel",
@@ -372,8 +370,8 @@ class RealInstallWithLegs(unittest.TestCase):
         self.assertEqual(using, self.LEGS)
 
     def test_the_harbor_dev_leg_installs_only_the_dev_extra(self):
-        # The dev leg's install-with replaces the top-level one, so it does not
-        # get the parity leg's harbor and test packages.
+        # The dev leg's install-with replaces the top-level one, so it installs
+        # the dev extra and does not add harbor or the also-install-unlocked list.
         install_with = self.jobs["inspect_harbor (dev)"]["install-with"]
         self.assertEqual(install_with["extras"], "dev")
         self.assertEqual(install_with["also-install-unlocked"], "")
