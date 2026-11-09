@@ -6,9 +6,14 @@ ref: main
 cadence: nightly
 python: "3.12"
 timeout-minutes: 30
-install: |
-  uv venv
-  uv pip install --exclude-newer false -e . --group dev
+# The shared install action does the install (see README.md, "install-with"):
+# an editable install of the dev extra. --no-config (from project-uv-settings:
+# ignore) drops the repo's per-package cooldowns, and --exclude-newer false
+# (from versions: unlocked) clears the cooldown.
+install-with:
+  versions: unlocked
+  project-uv-settings: ignore
+  extras: dev
 test: |
   # Every check runs; the step fails if any did.
   status=0
