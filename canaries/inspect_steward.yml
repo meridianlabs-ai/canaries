@@ -12,7 +12,7 @@ python: "3.12"
 timeout-minutes: 30
 install: |
   uv venv
-  uv pip install --exclude-newer false -e . --group dev
+  uv pip install --exclude-newer false -e '.[dev]'
 test: |
   # Every check runs; the step fails if any did.
   status=0
