@@ -339,9 +339,24 @@ class RealCanaries(unittest.TestCase):
 
 
 class RealInstallWithLegs(unittest.TestCase):
-    # Only these legs use install-with: inspect_scout, inspect_sentinel,
-    # inspect_swe, inspect_harbor parity, and all four inspect_ai legs. The
-    # inspect_harbor dev leg uses install.
+    # Only these legs use install-with; README.md gives the reasons for the others.
+    LEGS = {
+        "inspect_scout",
+        "inspect_sentinel",
+        "inspect_swe",
+        "inspect_sandboxes",
+        "inspect_petri",
+        "inspect_swarm",
+        "petri_bloom",
+        "petri_dish",
+        "inspect_harbor (parity)",
+        "inspect_harbor (dev)",
+        "inspect_ai (asyncio)",
+        "inspect_ai (trio)",
+        "inspect_ai (sandbox-tools)",
+        "inspect_ai (docs)",
+    }
+
     @classmethod
     def setUpClass(cls):
         paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
@@ -352,23 +367,31 @@ class RealInstallWithLegs(unittest.TestCase):
 
     def test_only_these_legs_use_install_with(self):
         using = {name for name, job in self.jobs.items() if isinstance(job.get("install-with"), dict)}
-        self.assertEqual(using, {"inspect_scout", "inspect_sentinel", "inspect_swe", "inspect_harbor (parity)", "inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (sandbox-tools)", "inspect_ai (docs)"})
+        self.assertEqual(using, self.LEGS)
 
-    def test_the_harbor_dev_leg_keeps_its_install(self):
-        job = self.jobs["inspect_harbor (dev)"]
-        self.assertNotIn("install-with", job)
-        self.assertIn("--group dev", job["install"])
+    def test_the_harbor_dev_leg_installs_only_the_dev_extra(self):
+        # The dev leg's install-with replaces the top-level one, so it installs
+        # the dev extra and does not add harbor or the also-install-unlocked list.
+        install_with = self.jobs["inspect_harbor (dev)"]["install-with"]
+        self.assertEqual(install_with["extras"], "dev")
+        self.assertEqual(install_with["also-install-unlocked"], "")
 
     def test_install_with_legs_are_unlocked(self):
         # A canary install is unlocked and ignores the repo's uv settings. It
         # never touches the Actions cache, but the canary step fixes that (not
         # install-with); scripts/test_workflow.py checks the step passes none.
-        for name in ("inspect_scout", "inspect_sentinel", "inspect_swe", "inspect_harbor (parity)", "inspect_ai (asyncio)", "inspect_ai (trio)", "inspect_ai (sandbox-tools)", "inspect_ai (docs)"):
+        for name in sorted(self.LEGS):
             with self.subTest(job=name):
                 install_with = self.jobs[name]["install-with"]
                 self.assertEqual(install_with["versions"], "unlocked")
                 self.assertNotIn("actions-cache", install_with)
                 self.assertEqual(install_with["project-uv-settings"], "ignore")
+
+    def test_no_install_uses_the_dev_group(self):
+        # A canary installs the dev extra (.[dev]), not --group dev.
+        for name, job in self.jobs.items():
+            with self.subTest(job=name):
+                self.assertNotIn("--group dev", job.get("install", ""))
 
 
 if __name__ == "__main__":
