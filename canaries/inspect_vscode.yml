@@ -25,7 +25,7 @@ install: |
   sudo apt-get update
   sudo apt-get install -y xvfb fish
   uv venv
-  uv pip install --exclude-newer false inspect-ai inspect-scout
+  uv pip install --no-config --exclude-newer false inspect-ai inspect-scout
 test: |
   # Every check runs; the step fails if any did.
   status=0

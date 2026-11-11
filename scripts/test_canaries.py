@@ -84,6 +84,23 @@ def runs_static_analysis(canary):
     return any(CHECKER.search(scrubbed(test)) for test in effective_tests(canary))
 
 
+# A uv command that resolves dependencies.
+UV_RESOLVE = re.compile(r"\buv\s+(?:pip\s+install|sync|lock)\b")
+NO_COOLDOWN = (re.compile(r"--no-config\b"), re.compile(r"--exclude-newer[\s=]+false\b"))
+
+
+def cooldown_kept(install):
+    """The uv commands in an install script that resolve dependencies without
+    both --exclude-newer false (which clears the global cooldown) and
+    --no-config (which drops the repository's [tool.uv.exclude-newer-package]
+    entries), so they may install an older release than the newest."""
+    script = scrubbed(install).replace("\\\n", " ")
+    commands = re.split(r"\n|;|&&|\|\|?", script)
+    return [
+        c.strip() for c in commands if UV_RESOLVE.search(c) and not all(flag.search(c) for flag in NO_COOLDOWN)
+    ]
+
+
 class RunsStaticAnalysis(unittest.TestCase):
     def test_no_static_analysis_fails(self):
         self.assertFalse(runs_static_analysis({"test": "uv run --no-sync pytest -ra"}))
@@ -165,6 +182,36 @@ class RunsStaticAnalysis(unittest.TestCase):
         self.assertFalse(runs_static_analysis({"test": "uv run --no-sync pytest -ra", "static-analysis-exempt": ""}))
         self.assertFalse(runs_static_analysis({"test": "uv run --no-sync pytest -ra", "static-analysis-exempt": "  "}))
         self.assertFalse(runs_static_analysis({"test": "uv run --no-sync pytest -ra", "static-analysis-exempt": True}))
+
+
+class CooldownKept(unittest.TestCase):
+    def test_both_flags_pass(self):
+        self.assertEqual(cooldown_kept("uv venv\nuv pip install --no-config --exclude-newer false -e '.[dev]'"), [])
+
+    def test_missing_no_config_fails(self):
+        self.assertEqual(
+            cooldown_kept("uv venv\nuv pip install --exclude-newer false -e '.[dev]'"),
+            ["uv pip install --exclude-newer false -e '.[dev]'"],
+        )
+
+    def test_uv_sync_missing_no_config_fails(self):
+        self.assertTrue(cooldown_kept("uv sync --dev --upgrade --exclude-newer false"))
+
+    def test_missing_exclude_newer_false_fails(self):
+        self.assertTrue(cooldown_kept("uv pip install --no-config -e ."))
+
+    def test_flags_on_a_continuation_line_pass(self):
+        self.assertEqual(cooldown_kept("uv pip install \\\n  --no-config --exclude-newer=false -e ."), [])
+
+    def test_each_command_is_checked(self):
+        # The first install's flags don't cover the second.
+        self.assertTrue(cooldown_kept("uv pip install --no-config --exclude-newer false -e . && uv pip install pytest"))
+
+    def test_flag_only_in_a_comment_fails(self):
+        self.assertTrue(cooldown_kept("uv pip install --exclude-newer false -e .  # --no-config"))
+
+    def test_other_commands_pass(self):
+        self.assertEqual(cooldown_kept("uv venv\nuv run --no-sync python x.py\nyarn install --no-lockfile"), [])
 
 
 class TargetRef(unittest.TestCase):
@@ -392,6 +439,13 @@ class RealInstallWithLegs(unittest.TestCase):
         for name, job in self.jobs.items():
             with self.subTest(job=name):
                 self.assertNotIn("--group dev", job.get("install", ""))
+
+    def test_install_lines_keep_no_cooldown(self):
+        # The install lines' counterpart of test_install_with_legs_are_unlocked:
+        # every uv install passes --no-config and --exclude-newer false.
+        for name, job in self.jobs.items():
+            with self.subTest(job=name):
+                self.assertEqual(cooldown_kept(job.get("install", "")), [])
 
 
 if __name__ == "__main__":
