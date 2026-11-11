@@ -41,9 +41,10 @@ RULE = "a string of letters, digits, '.', '_' or '-' (quote it if YAML would rea
 
 # A part installs its Python packages with `install-with`, a mapping that drives
 # meridianlabs-ai/actions/install-python-dependencies; an `install` script, run
-# after it, installs anything else (JavaScript, system packages). The canary file sets a subset of the action's inputs; the planner fills every
-# other input with the action's default, so a matrix value never arrives empty
-# in place of a default. versions has no default (required). python-version and
+# after it, installs anything else (JavaScript, system packages). The canary
+# file sets a subset of the action's inputs; the planner fills every other input
+# with the action's default, so a matrix value never arrives empty in place of a
+# default. versions has no default (required). python-version and
 # project-dir are not set here: the planner takes them from the part's `python`
 # and its checkout `dir`.
 INSTALL_WITH_DEFAULTS = {

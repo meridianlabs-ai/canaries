@@ -84,16 +84,12 @@ def runs_static_analysis(canary):
     return any(CHECKER.search(scrubbed(test)) for test in effective_tests(canary))
 
 
-# A uv command: at the start of a line, or after a shell separator.
-UV_COMMAND = re.compile(r"(?:^|[;&|(])\s*uv\s", re.MULTILINE)
-
-
 def runs_uv(install):
-    """True if an install script runs uv. A part installs its Python packages
-    with install-with, so its install script (JavaScript, system packages)
-    never needs uv, and a uv install there would keep the repository's
+    """True if an install script names uv outside a comment. A part installs its
+    Python packages with install-with, so its install script (JavaScript, system
+    packages) never needs uv, and a uv install there would keep the repository's
     per-package cooldowns unless it passed --no-config."""
-    return bool(UV_COMMAND.search(scrubbed(install)))
+    return bool(re.search(r"\buv\b", scrubbed(install)))
 
 
 class RunsStaticAnalysis(unittest.TestCase):
@@ -185,6 +181,11 @@ class RunsUv(unittest.TestCase):
 
     def test_uv_after_a_separator_fails(self):
         self.assertTrue(runs_uv("corepack enable && uv sync"))
+
+    def test_uv_behind_an_env_assignment_or_sudo_fails(self):
+        self.assertTrue(runs_uv("UV_NO_SOURCES=1 uv pip install -e ."))
+        self.assertTrue(runs_uv("sudo uv pip install -e ."))
+        self.assertTrue(runs_uv("python -m uv pip install -e ."))
 
     def test_uv_in_a_comment_passes(self):
         self.assertFalse(runs_uv("# uv venv\nyarn install --no-lockfile"))
