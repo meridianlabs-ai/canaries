@@ -84,21 +84,16 @@ def runs_static_analysis(canary):
     return any(CHECKER.search(scrubbed(test)) for test in effective_tests(canary))
 
 
-# A uv command that resolves dependencies.
-UV_RESOLVE = re.compile(r"\buv\s+(?:pip\s+install|sync|lock)\b")
-NO_COOLDOWN = (re.compile(r"--no-config\b"), re.compile(r"--exclude-newer[\s=]+false\b"))
+# A uv command: at the start of a line, or after a shell separator.
+UV_COMMAND = re.compile(r"(?:^|[;&|(])\s*uv\s", re.MULTILINE)
 
 
-def cooldown_kept(install):
-    """The uv commands in an install script that resolve dependencies without
-    both --exclude-newer false (which clears the global cooldown) and
-    --no-config (which drops the repository's [tool.uv.exclude-newer-package]
-    entries), so they may install an older release than the newest."""
-    script = scrubbed(install).replace("\\\n", " ")
-    commands = re.split(r"\n|;|&&|\|\|?", script)
-    return [
-        c.strip() for c in commands if UV_RESOLVE.search(c) and not all(flag.search(c) for flag in NO_COOLDOWN)
-    ]
+def runs_uv(install):
+    """True if an install script runs uv. A part installs its Python packages
+    with install-with, so its install script (JavaScript, system packages)
+    never needs uv, and a uv install there would keep the repository's
+    per-package cooldowns unless it passed --no-config."""
+    return bool(UV_COMMAND.search(scrubbed(install)))
 
 
 class RunsStaticAnalysis(unittest.TestCase):
@@ -184,34 +179,18 @@ class RunsStaticAnalysis(unittest.TestCase):
         self.assertFalse(runs_static_analysis({"test": "uv run --no-sync pytest -ra", "static-analysis-exempt": True}))
 
 
-class CooldownKept(unittest.TestCase):
-    def test_both_flags_pass(self):
-        self.assertEqual(cooldown_kept("uv venv\nuv pip install --no-config --exclude-newer false -e '.[dev]'"), [])
+class RunsUv(unittest.TestCase):
+    def test_uv_pip_install_fails(self):
+        self.assertTrue(runs_uv("uv venv\nuv pip install --no-config --exclude-newer false -e '.[dev]'"))
 
-    def test_missing_no_config_fails(self):
-        self.assertEqual(
-            cooldown_kept("uv venv\nuv pip install --exclude-newer false -e '.[dev]'"),
-            ["uv pip install --exclude-newer false -e '.[dev]'"],
-        )
+    def test_uv_after_a_separator_fails(self):
+        self.assertTrue(runs_uv("corepack enable && uv sync"))
 
-    def test_uv_sync_missing_no_config_fails(self):
-        self.assertTrue(cooldown_kept("uv sync --dev --upgrade --exclude-newer false"))
+    def test_uv_in_a_comment_passes(self):
+        self.assertFalse(runs_uv("# uv venv\nyarn install --no-lockfile"))
 
-    def test_missing_exclude_newer_false_fails(self):
-        self.assertTrue(cooldown_kept("uv pip install --no-config -e ."))
-
-    def test_flags_on_a_continuation_line_pass(self):
-        self.assertEqual(cooldown_kept("uv pip install \\\n  --no-config --exclude-newer=false -e ."), [])
-
-    def test_each_command_is_checked(self):
-        # The first install's flags don't cover the second.
-        self.assertTrue(cooldown_kept("uv pip install --no-config --exclude-newer false -e . && uv pip install pytest"))
-
-    def test_flag_only_in_a_comment_fails(self):
-        self.assertTrue(cooldown_kept("uv pip install --exclude-newer false -e .  # --no-config"))
-
-    def test_other_commands_pass(self):
-        self.assertEqual(cooldown_kept("uv venv\nuv run --no-sync python x.py\nyarn install --no-lockfile"), [])
+    def test_other_tools_pass(self):
+        self.assertFalse(runs_uv("sudo apt-get install -y xvfb fish\npnpm install --config.lockfile=false"))
 
 
 class TargetRef(unittest.TestCase):
@@ -291,10 +270,10 @@ class InstallWithValidation(unittest.TestCase):
         result = plan([{**self.BASE, "install-with": {"versions": "unlocked", "project-uv-settings": "ignore"}}])
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_install_and_install_with_together_fail(self):
-        result = plan([{**self.BASE, "install": "uv venv", "install-with": {"versions": "locked"}}])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("not both", result.stderr)
+    def test_install_and_install_with_together_pass(self):
+        # install-with installs the Python packages; install adds other tools.
+        result = plan([{**self.BASE, "install": "yarn install", "install-with": {"versions": "unlocked"}}])
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_unknown_input_fails(self):
         result = plan([{**self.BASE, "install-with": {"versions": "locked", "bogus": "x"}}])
@@ -321,21 +300,21 @@ class InstallWithValidation(unittest.TestCase):
         result = plan([{**self.BASE, "variants": [{"label": "a", "install-with": {"versions": "unlocked", "project-uv-settings": "ignore"}}]}])
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_variant_install_with_replaces_the_top_level_install(self):
-        entry = {**self.BASE, "install": "uv venv", "variants": [{"label": "a", "install-with": {"versions": "unlocked"}}]}
+    def test_variant_install_with_keeps_the_top_level_install(self):
+        entry = {**self.BASE, "install": "yarn install", "variants": [{"label": "a", "install-with": {"versions": "unlocked"}}]}
         result = plan([entry])
         self.assertEqual(result.returncode, 0, result.stderr)
         job = json.loads(result.stdout)["include"][0]
         self.assertEqual(job["install-with"]["versions"], "unlocked")
-        self.assertNotIn("install", job)
+        self.assertEqual(job["install"], "yarn install")
 
-    def test_variant_install_replaces_the_top_level_install_with(self):
-        entry = {**self.BASE, "install-with": {"versions": "unlocked"}, "variants": [{"label": "a", "install": "uv venv"}]}
+    def test_variant_install_keeps_the_top_level_install_with(self):
+        entry = {**self.BASE, "install-with": {"versions": "unlocked"}, "variants": [{"label": "a", "install": "yarn install"}]}
         result = plan([entry])
         self.assertEqual(result.returncode, 0, result.stderr)
         job = json.loads(result.stdout)["include"][0]
-        self.assertEqual(job["install"], "uv venv")
-        self.assertNotIn("install-with", job)
+        self.assertEqual(job["install"], "yarn install")
+        self.assertEqual(job["install-with"]["versions"], "unlocked")
 
     def test_actions_cache_fails(self):
         # The canary step always passes actions-cache none; the file can't set it.
@@ -385,25 +364,7 @@ class RealCanaries(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
-class RealInstallWithLegs(unittest.TestCase):
-    # Only these legs use install-with; README.md gives the reasons for the others.
-    LEGS = {
-        "inspect_scout",
-        "inspect_sentinel",
-        "inspect_swe",
-        "inspect_sandboxes",
-        "inspect_petri",
-        "inspect_swarm",
-        "petri_bloom",
-        "petri_dish",
-        "inspect_harbor (parity)",
-        "inspect_harbor (dev)",
-        "inspect_ai (asyncio)",
-        "inspect_ai (trio)",
-        "inspect_ai (sandbox-tools)",
-        "inspect_ai (docs)",
-    }
-
+class RealInstalls(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
@@ -412,10 +373,6 @@ class RealInstallWithLegs(unittest.TestCase):
         assert result.returncode == 0, result.stderr
         cls.jobs = {job["name"]: job for job in json.loads(result.stdout)["include"]}
 
-    def test_only_these_legs_use_install_with(self):
-        using = {name for name, job in self.jobs.items() if isinstance(job.get("install-with"), dict)}
-        self.assertEqual(using, self.LEGS)
-
     def test_the_harbor_dev_leg_installs_only_the_dev_extra(self):
         # The dev leg's install-with replaces the top-level one, so it installs
         # the dev extra and does not add harbor or the also-install-unlocked list.
@@ -423,29 +380,23 @@ class RealInstallWithLegs(unittest.TestCase):
         self.assertEqual(install_with["extras"], "dev")
         self.assertEqual(install_with["also-install-unlocked"], "")
 
-    def test_install_with_legs_are_unlocked(self):
-        # A canary install is unlocked and ignores the repo's uv settings. It
-        # never touches the Actions cache, but the canary step fixes that (not
-        # install-with); scripts/test_workflow.py checks the step passes none.
-        for name in sorted(self.LEGS):
+    def test_every_part_installs_python_unlocked_with_install_with(self):
+        # A canary install is unlocked and ignores the repo's uv settings, which
+        # drops its per-package cooldowns. It never touches the Actions cache,
+        # but the canary step fixes that (not install-with);
+        # scripts/test_workflow.py checks the step passes none.
+        for name, job in self.jobs.items():
             with self.subTest(job=name):
-                install_with = self.jobs[name]["install-with"]
+                install_with = job.get("install-with")
+                self.assertIsInstance(install_with, dict)
                 self.assertEqual(install_with["versions"], "unlocked")
                 self.assertNotIn("actions-cache", install_with)
                 self.assertEqual(install_with["project-uv-settings"], "ignore")
 
-    def test_no_install_uses_the_dev_group(self):
-        # A canary installs the dev extra (.[dev]), not --group dev.
+    def test_no_install_line_runs_uv(self):
         for name, job in self.jobs.items():
             with self.subTest(job=name):
-                self.assertNotIn("--group dev", job.get("install", ""))
-
-    def test_install_lines_keep_no_cooldown(self):
-        # The install lines' counterpart of test_install_with_legs_are_unlocked:
-        # every uv install passes --no-config and --exclude-newer false.
-        for name, job in self.jobs.items():
-            with self.subTest(job=name):
-                self.assertEqual(cooldown_kept(job.get("install", "")), [])
+                self.assertFalse(runs_uv(job.get("install", "")), f"{name} installs with uv outside install-with")
 
 
 if __name__ == "__main__":

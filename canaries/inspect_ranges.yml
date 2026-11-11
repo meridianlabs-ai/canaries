@@ -6,11 +6,13 @@ ref: main
 cadence: nightly
 python: "3.12"
 timeout-minutes: 30
+# The shared install action does the Python install (see README.md,
+# "install-with"): an editable install of the dev extra.
+install-with:
+  versions: unlocked
+  project-uv-settings: ignore
+  extras: dev
 install: |
-  uv venv
-  # --no-config drops the repo's per-package cooldowns; ranges has no uv
-  # sources or index settings to keep.
-  uv pip install --no-config --exclude-newer false -e '.[dev]'
   # qemu-utils and the pinned Go and .NET toolchains for the codec drift guards,
   # installed by the steps of inspect_ranges's own py-test job so the pins and
   # checksums stay in step with it.

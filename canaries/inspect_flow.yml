@@ -7,10 +7,14 @@ ref: main
 cadence: 2h
 python: "3.14"
 timeout-minutes: 45
-install: |
-  # --no-config drops the repo's per-package cooldowns; the tests path source in
-  # [tool.uv.sources] still applies.
-  uv sync --no-config --dev --upgrade --exclude-newer false
+# The shared install action does the install (see README.md, "install-with"):
+# an editable install of the dev extra, plus the tests' local_eval package,
+# which flow's dev group gets from a path source that UV_NO_SOURCES drops.
+install-with:
+  versions: unlocked
+  project-uv-settings: ignore
+  extras: dev
+  also-install-unlocked: ./tests/local_eval
 test: |
   # setup-uv exports UV_PYTHON for the install; unset it so the tests that build
   # venvs for other Python versions get the version they ask for.
@@ -21,8 +25,7 @@ test: |
   echo "::group::pyright"; uv run --no-sync pyright || status=1; echo "::endgroup::"
   # check-type-gen job of inspect_flow's build.yaml: regenerate the types and
   # fail if the committed copy no longer matches. type_gen.py writes only
-  # src/inspect_flow/_types/generated.py, so scope the diff to it: `uv sync
-  # --upgrade` rewrites uv.lock, which would make a bare git status always dirty.
+  # src/inspect_flow/_types/generated.py, so scope the diff to it.
   echo "::group::type-gen drift"
   uv run --no-sync python src/inspect_flow/_types/type_gen.py || status=1
   git diff --exit-code -- src/inspect_flow/_types/generated.py || status=1
