@@ -3,11 +3,13 @@
 # - proxy-routes: the extension's webview proxy rejects any view-server route
 #   it doesn't recognize, so this dumps the routes the newest inspect-ai and
 #   inspect-scout serve and checks each one against the proxy's table.
-#   Replaces inspect_vscode's proxy-routes.yml.
+#   Meant to replace inspect_vscode's proxy-routes.yml.
 # - The extension tests run in the newest stable VS Code, which
-#   @vscode/test-electron downloads when no version is set.
+#   @vscode/test-electron downloads when no version is set. `pnpm test` builds
+#   the extension first (its pretest script).
 # The VSIX bundles its npm dependencies at build time, so they install from the
-# lockfile, and lint, the builds and packaging stay in inspect_vscode's CI.
+# lockfile, and lint, the production build and packaging stay in
+# inspect_vscode's CI.
 name: inspect_vscode
 repo: meridianlabs-ai/inspect_vscode
 ref: main

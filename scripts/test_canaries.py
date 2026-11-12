@@ -2,7 +2,8 @@
 
 A canary catches breakage from the newest, unlocked releases of its
 dependencies, so it runs every static analysis tool its repository's CI runs
-(ruff and prettier excepted; see README.md, "What a canary runs"). This test
+(ruff, prettier and checks of bundled JavaScript excepted; see README.md,
+"What a canary runs"). This test
 fails a canary whose test script calls no type checker (mypy, pyright, tsc) or
 eslint in any of its effective jobs, unless the file sets
 `static-analysis-exempt` to a reason string.

@@ -40,7 +40,7 @@ Two CI steps are left out: ruff and prettier. They check only our own code's sty
 
 Repository checks that read only our own files are left out for the same reason: suppression ledgers, config carve-out ledgers, docstring and override checks, pre-commit hooks, and a rebuilt `dist/` compared to the committed one. A new dependency release can't change what they report. Checks of generated files — schemas, generated types — stay in, because their output depends on the installed packages.
 
-JavaScript that we bundle into what we ship is left out as well. The widgets in a wheel and the code in a VSIX carry npm dependencies fixed when we build them, so users never resolve them, and a new npm release reaches users only through a lockfile update in the repository, whose CI runs the build. A canary that needs those dependencies for a check it keeps (a type check against the newest Python servers, extension tests) installs them from the lockfile, and leaves the JavaScript builds, lint and packaging to the repository's CI. What users bring themselves stays in: their Python packages, and tools such as VS Code that update on their own.
+JavaScript that we bundle into what we ship is left out as well. The widgets in a wheel and the code in a VSIX carry npm dependencies fixed when we build them, so users never resolve them, and a new npm release reaches users only after a lockfile update and a rebuild in the repository. A canary that needs those dependencies for a check it keeps (inspect_vscode's proxy-routes check and extension tests) installs them from the lockfile, and leaves checks that only exercise them (JavaScript type checks, production builds, lint, packaging) to the repository's CI. What users bring themselves stays in: their Python packages, and tools such as VS Code that update on their own.
 
 When you add or change a canary, compare it with the repository's `.github/workflows`. [`scripts/test_canaries.py`](scripts/test_canaries.py) fails any canary whose test script calls no type checker (mypy, pyright, tsc) or eslint, so the principle can't quietly drift. A canary whose repository has none sets `static-analysis-exempt` to a reason instead.
 
@@ -56,7 +56,7 @@ ref: main                   # must be main
 cadence: 2h                 # 2h or nightly
 python: "3.11"
 timeout-minutes: 60
-install-with:               # newest releases of everything; see below
+install-with:               # newest Python releases; see below
   versions: unlocked
   project-uv-settings: ignore
   extras: dev
