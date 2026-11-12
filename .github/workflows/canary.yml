@@ -133,11 +133,9 @@ jobs:
       - name: Install the newest releases
         if: ${{ matrix.install-with.versions }}
         uses: meridianlabs-ai/actions/install-python-dependencies@2e29d39eac45f500a64f443ec31aa6fb874f9ddc # main, 2026-11-02
-        # A canary tests the newest releases. uv applies [tool.uv.sources] also
-        # with --no-config (inspect_scout points inspect-ai at inspect_ai main),
-        # so this turns sources off.
-        env:
-          UV_NO_SOURCES: "1"
+        # uv applies the repo's [tool.uv.sources] also with --no-config, so a
+        # path or workspace source (e.g. inspect_flow's local-eval) installs as
+        # in the repo's own CI.
         with:
           versions: ${{ matrix.install-with.versions }}
           python-version: ${{ matrix.install-with.python-version }}

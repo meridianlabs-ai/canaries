@@ -155,10 +155,11 @@ class CanaryWorkflow(unittest.TestCase):
         step.setdefault("with", {})["actions-cache"] = "read-write"
         self.assertFalse(cache_is_denied(job))
 
-    def test_the_install_step_turns_off_uv_sources(self):
-        # A source (e.g. a git branch) would replace the newest release.
+    def test_the_install_step_keeps_uv_sources_on(self):
+        # UV_NO_SOURCES would also drop a repo's path sources (e.g. inspect_flow's
+        # local-eval), which its tests need.
         step = next(s for s in self.jobs["canary"]["steps"] if uses(s) == "meridianlabs-ai/actions/install-python-dependencies")
-        self.assertEqual((step.get("env") or {}).get("UV_NO_SOURCES"), "1")
+        self.assertNotIn("UV_NO_SOURCES", step.get("env") or {})
 
     def test_the_canary_job_carries_the_warning_comment(self):
         self.assertTrue(has_warning_comment(raw("canary.yml")))
