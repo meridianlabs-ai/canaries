@@ -1,12 +1,12 @@
-# inspect_viz's tests, mypy, and the TypeScript typecheck and build on the
-# newest releases of everything, on the newest Python in its CI, as one canary
-# so a break alerts once.
+# inspect_viz's tests and mypy on the newest releases of its Python
+# dependencies, on the newest Python in its CI, as one canary so a break alerts once. The wheel ships the
+# widgets prebuilt, with their JS dependencies fixed at build time, so the
+# canary installs no JS.
 name: inspect_viz
 repo: meridianlabs-ai/inspect_viz
 ref: main
 cadence: nightly
 python: "3.14"
-node: "22"
 timeout-minutes: 30
 # The shared install action does the Python install (see README.md,
 # "install-with"): an editable install of the dev extra, as inspect_viz's CI.
@@ -14,15 +14,9 @@ install-with:
   versions: unlocked
   project-uv-settings: ignore
   extras: dev
-install: |
-  # Frontier install of the JS deps: yarn 1 has no release cooldown, and
-  # --no-lockfile takes the newest versions in range.
-  yarn install --no-lockfile
 test: |
   # Every check runs; the step fails if any did.
   status=0
   echo "::group::pytest"; uv run --no-sync pytest -ra || status=1; echo "::endgroup::"
   echo "::group::mypy"; uv run --no-sync mypy src || status=1; echo "::endgroup::"
-  echo "::group::typecheck"; yarn typecheck || status=1; echo "::endgroup::"
-  echo "::group::build"; yarn build || status=1; echo "::endgroup::"
   exit $status

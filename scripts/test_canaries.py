@@ -2,7 +2,8 @@
 
 A canary catches breakage from the newest, unlocked releases of its
 dependencies, so it runs every static analysis tool its repository's CI runs
-(ruff and prettier excepted; see README.md, "What a canary runs"). This test
+(ruff, prettier and checks of bundled JavaScript excepted; see README.md,
+"What a canary runs"). This test
 fails a canary whose test script calls no type checker (mypy, pyright, tsc) or
 eslint in any of its effective jobs, unless the file sets
 `static-analysis-exempt` to a reason string.
@@ -24,11 +25,9 @@ import unittest
 CANARIES = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "canaries")
 PLAN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plan.py")
 
-# A type checker (mypy, pyright, tsc) or an eslint call. `pnpm lint`,
-# `pnpm compile-tests` and `yarn typecheck` wrap eslint or tsc.
-CHECKER = re.compile(
-    r"\b(?:mypy|pyright|tsc|eslint)\b|\bpnpm\s+lint\b|\bpnpm\s+compile-tests\b|\byarn\s+typecheck\b"
-)
+# A type checker (mypy, pyright, tsc) or an eslint call. `pnpm lint` and
+# `pnpm compile-tests` wrap eslint or tsc.
+CHECKER = re.compile(r"\b(?:mypy|pyright|tsc|eslint)\b|\bpnpm\s+lint\b|\bpnpm\s+compile-tests\b")
 
 
 def load(path):

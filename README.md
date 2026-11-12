@@ -6,7 +6,7 @@ Scheduled tests that run [Meridian Labs](https://meridianlabs.ai) and [Inspect](
 
 Our project repositories install dependencies only from their lockfiles, pinned to reviewed versions and refreshed through reviewed updates. That keeps their CI reproducible and limits what a compromised package could reach. But it also means they wouldn't notice an upstream break until the next lockfile update.
 
-The canaries do the opposite: each run installs the latest of everything, with no lockfile and no waiting period for new releases. Those are exactly the runs where a malicious new release would execute, so they live here, isolated from everything else:
+The canaries do the opposite: each run installs the latest of every dependency our users resolve themselves, with no lockfile and no waiting period for new releases. Those are exactly the runs where a malicious new release would execute, so they live here, isolated from everything else:
 
 - **No secrets.** Canary jobs have no credentials. The only secrets in this repository are the Slack credentials for our alert channel, available only to the job that sends alerts. That job checks out only this repository, without credentials, and runs [`scripts/notify.py`](scripts/notify.py), which uses only the Python standard library: no third-party code. It reads the canary results and logs, and treats log text as untrusted. Job names, by contrast, are trusted repository metadata: GitHub sets them from the matrix the planner builds out of this repository's canary files, canary jobs can't rename them, and alerts go out only for scheduled runs of `main` and manual runs, never for pull requests. [`secrets.yml`](.github/workflows/secrets.yml) fails if an Actions secret other than `github_token` reaches a run outside an environment. An organization secret shared with all repositories is one example.
 - **Read-only token.** Every job's `GITHUB_TOKEN` is read-only.
@@ -40,6 +40,8 @@ Two CI steps are left out: ruff and prettier. They check only our own code's sty
 
 Repository checks that read only our own files are left out for the same reason: suppression ledgers, config carve-out ledgers, docstring and override checks, pre-commit hooks, and a rebuilt `dist/` compared to the committed one. A new dependency release can't change what they report. Checks of generated files — schemas, generated types — stay in, because their output depends on the installed packages.
 
+JavaScript that we bundle into what we ship is left out as well. The widgets in a wheel and the code in a VSIX carry npm dependencies fixed when we build them, so users never resolve them, and a new npm release reaches users only after a lockfile update and a rebuild in the repository. A canary that needs those dependencies for a check it keeps (inspect_vscode's proxy-routes check and extension tests) installs them from the lockfile, and leaves checks that only exercise them (JavaScript type checks, production builds, lint, packaging) to the repository's CI. What users bring themselves stays in: their Python packages, and tools such as VS Code that update on their own.
+
 When you add or change a canary, compare it with the repository's `.github/workflows`. [`scripts/test_canaries.py`](scripts/test_canaries.py) fails any canary whose test script calls no type checker (mypy, pyright, tsc) or eslint, so the principle can't quietly drift. A canary whose repository has none sets `static-analysis-exempt` to a reason instead.
 
 ## Adding a canary
@@ -54,7 +56,7 @@ ref: main                   # must be main
 cadence: 2h                 # 2h or nightly
 python: "3.11"
 timeout-minutes: 60
-install-with:               # newest releases of everything; see below
+install-with:               # newest Python releases; see below
   versions: unlocked
   project-uv-settings: ignore
   extras: dev
