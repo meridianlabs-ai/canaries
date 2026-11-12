@@ -39,11 +39,12 @@ GIT_URL = re.compile(r"git\+\S+")
 VARIANT_FIELDS = {"label", "python", "install", "install-with", "test", "runs-on", "node", "timeout-minutes"}
 RULE = "a string of letters, digits, '.', '_' or '-' (quote it if YAML would read a number or boolean)"
 
-# A part installs with a plain `install` script or with `install-with`, a
-# mapping that drives meridianlabs-ai/actions/install-python-dependencies. The
-# canary file sets a subset of the action's inputs; the planner fills every
-# other input with the action's default, so a matrix value never arrives empty
-# in place of a default. versions has no default (required). python-version and
+# A part installs its Python packages with `install-with`, a mapping that drives
+# meridianlabs-ai/actions/install-python-dependencies; an `install` script, run
+# after it, installs anything else (JavaScript, system packages). The canary
+# file sets a subset of the action's inputs; the planner fills every other input
+# with the action's default, so a matrix value never arrives empty in place of a
+# default. versions has no default (required). python-version and
 # project-dir are not set here: the planner takes them from the part's `python`
 # and its checkout `dir`.
 INSTALL_WITH_DEFAULTS = {
@@ -88,11 +89,9 @@ def unpinned_git_url(script):
 
 
 def check_install_with(where, part):
-    """Stop if a part sets both install and install-with, or if its install-with
-    is not a mapping of known action inputs with string values and a versions, or
-    carries a git+ URL not pinned to @main in a package input."""
-    if "install" in part and "install-with" in part:
-        sys.exit(f"{where}: set install or install-with, not both")
+    """Stop if a part's install-with is not a mapping of known action inputs with
+    string values and a versions, or carries a git+ URL not pinned to @main in a
+    package input."""
     iw = part.get("install-with")
     if iw is None:
         return
@@ -115,17 +114,6 @@ def check_install_with(where, part):
             sys.exit(f"{where}: install-with {name} git+ URL {bad!r} must pin @main")
 
 
-def merge_variant(base, variant):
-    """base with variant's keys over it, keeping install and install-with
-    exclusive: whichever one the variant sets replaces the other it inherits."""
-    merged = base | variant
-    if "install" in variant and "install-with" not in variant:
-        merged.pop("install-with", None)
-    if "install-with" in variant and "install" not in variant:
-        merged.pop("install", None)
-    return merged
-
-
 def full_install_with(job):
     """A job's install-with with every action input present: the file's value,
     else the action's default, plus python-version and project-dir derived from
@@ -145,7 +133,7 @@ def jobs(canary):
     if "variants" not in canary:
         parts = [base]
     else:
-        parts = [merge_variant(base, v) | {"name": f"{canary['name']} ({v['label']})"} for v in canary["variants"]]
+        parts = [base | v | {"name": f"{canary['name']} ({v['label']})"} for v in canary["variants"]]
     for part in parts:
         if "install-with" in part:
             part["install-with"] = full_install_with(part)

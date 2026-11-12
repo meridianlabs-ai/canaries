@@ -13,6 +13,15 @@ cadence: nightly
 python: "3.12"
 node: "22"
 timeout-minutes: 30
+# The shared install action installs the newest inspect-ai and inspect-scout
+# (see README.md, "install-with"); inspect_vscode has no Python project.
+install-with:
+  versions: unlocked
+  project-uv-settings: ignore
+  project-install: skip
+  also-install-unlocked: |
+    inspect-ai
+    inspect-scout
 install: |
   corepack enable
   # Frontier install: ignore the lockfile and the 7-day cooldown that
@@ -24,8 +33,6 @@ install: |
   # shell-integration tests need fish (ubuntu-latest already ships PowerShell).
   sudo apt-get update
   sudo apt-get install -y xvfb fish
-  uv venv
-  uv pip install --exclude-newer false inspect-ai inspect-scout
 test: |
   # Every check runs; the step fails if any did.
   status=0
@@ -46,7 +53,7 @@ test: |
   # own CI, where inspect/scout aren't installed. VSCODE_CLI=1 makes Scout's suite fail on mocha's 2 s hook
   # timeout, so left skipped; proxy-routes covers the route table, not asset layout.
   echo "::group::test"; REQUIRE_FISH_TESTS=1 REQUIRE_PWSH_TESTS=1 xvfb-run -a pnpm test || status=1; echo "::endgroup::"
-  # The canary's `uv venv` leaves a .venv the repo's .vscodeignore doesn't cover;
+  # The install action's .venv isn't covered by the repo's .vscodeignore;
   # without this vsce packages .venv/lib64 (a symlink to a dir) and dies EISDIR.
   printf '\n.venv/**\n' >> .vscodeignore
   echo "::group::vsce:package"; pnpm vsce:package || status=1; echo "::endgroup::"

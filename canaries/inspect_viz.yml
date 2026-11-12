@@ -8,11 +8,13 @@ cadence: nightly
 python: "3.14"
 node: "22"
 timeout-minutes: 30
+# The shared install action does the Python install (see README.md,
+# "install-with"): an editable install of the dev extra, as inspect_viz's CI.
+install-with:
+  versions: unlocked
+  project-uv-settings: ignore
+  extras: dev
 install: |
-  uv venv
-  # Dependencies must install from wheels; only inspect_viz is built (as
-  # PIP_ONLY_BINARY does in inspect_viz's CI).
-  uv pip install --exclude-newer false --only-binary :all: --no-binary inspect-viz ".[dev]"
   # Frontier install of the JS deps: yarn 1 has no release cooldown, and
   # --no-lockfile takes the newest versions in range.
   yarn install --no-lockfile
