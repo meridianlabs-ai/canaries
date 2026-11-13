@@ -109,7 +109,7 @@ jobs:
       # The shared setup-uv holds the one uv pin (0.13.5) for all Meridian
       # callers. actions-cache: none keeps a canary off the Actions cache, so an
       # unvetted release can't poison it.
-      - uses: meridianlabs-ai/actions/setup-uv@2e29d39eac45f500a64f443ec31aa6fb874f9ddc # main, 2026-11-02
+      - uses: meridianlabs-ai/actions/setup-uv@6245f003b5628736e543468ca41f61a42549643f # main, 2026-11-02
         with:
           python-version: ${{ matrix.python }}
           actions-cache: none
@@ -132,7 +132,7 @@ jobs:
       # if any, install everything else (JavaScript, system packages).
       - name: Install the newest releases
         if: ${{ matrix.install-with.versions }}
-        uses: meridianlabs-ai/actions/install-python-dependencies@2e29d39eac45f500a64f443ec31aa6fb874f9ddc # main, 2026-11-02
+        uses: meridianlabs-ai/actions/install-python-dependencies@6245f003b5628736e543468ca41f61a42549643f # main, 2026-11-02
         # A canary tests the newest releases. uv applies [tool.uv.sources] also
         # with --no-config (inspect_scout points inspect-ai at inspect_ai main),
         # so this turns sources off.
