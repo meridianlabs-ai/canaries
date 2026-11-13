@@ -134,8 +134,8 @@ jobs:
         if: ${{ matrix.install-with.versions }}
         uses: meridianlabs-ai/actions/install-python-dependencies@2e29d39eac45f500a64f443ec31aa6fb874f9ddc # main, 2026-11-02
         # uv applies the repo's [tool.uv.sources] also with --no-config, so a
-        # path or workspace source (e.g. inspect_flow's local-eval) installs as
-        # in the repo's own CI.
+        # path or workspace source the install requests is used as in the repo's
+        # own CI. Do not set UV_NO_SOURCES.
         with:
           versions: ${{ matrix.install-with.versions }}
           python-version: ${{ matrix.install-with.python-version }}

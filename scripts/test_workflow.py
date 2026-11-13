@@ -156,8 +156,8 @@ class CanaryWorkflow(unittest.TestCase):
         self.assertFalse(cache_is_denied(job))
 
     def test_the_install_step_keeps_uv_sources_on(self):
-        # UV_NO_SOURCES would also drop a repo's path sources (e.g. inspect_flow's
-        # local-eval), which its tests need.
+        # A canary should apply the repo's path and workspace sources. Do not
+        # set UV_NO_SOURCES.
         step = next(s for s in self.jobs["canary"]["steps"] if uses(s) == "meridianlabs-ai/actions/install-python-dependencies")
         self.assertNotIn("UV_NO_SOURCES", step.get("env") or {})
 
