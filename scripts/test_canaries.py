@@ -393,6 +393,12 @@ class RealInstalls(unittest.TestCase):
                 self.assertNotIn("actions-cache", install_with)
                 self.assertEqual(install_with["project-uv-settings"], "ignore")
 
+    def test_the_flow_canary_installs_local_eval_from_the_path(self):
+        # Unlocked install uses `uv pip install -e '.[dev]'`, the optional extra,
+        # not flow's default dev group, which is what names local-eval.
+        install_with = self.jobs["inspect_flow"]["install-with"]
+        self.assertIn("./tests/local_eval", install_with["also-install-unlocked"])
+
     def test_no_install_line_runs_uv(self):
         for name, job in self.jobs.items():
             with self.subTest(job=name):

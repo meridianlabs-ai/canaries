@@ -1,7 +1,6 @@
 # inspect_scout's tests and mypy against the newest released versions of
 # everything, inspect_ai included (the Python jobs of inspect_scout's nightly),
-# on the newest Python in its CI, as one canary so a break alerts once. Testing
-# against inspect_ai main stays in scout's own CI.
+# on the newest Python in its CI, as one canary so a break alerts once.
 name: inspect_scout
 repo: meridianlabs-ai/inspect_scout
 ref: main
@@ -11,9 +10,7 @@ timeout-minutes: 30
 # The shared install action does the install (see README.md, "install-with"):
 # an editable install of the dev extra, like scout's own CI. --no-config (from
 # project-uv-settings: ignore) drops the repo's per-package cooldowns, and
-# --exclude-newer false (from versions: unlocked) clears the cooldown. The
-# workflow step sets UV_NO_SOURCES, so inspect-ai comes from its newest release,
-# not the git source in pyproject.
+# --exclude-newer false (from versions: unlocked) clears the cooldown.
 install-with:
   versions: unlocked
   project-uv-settings: ignore

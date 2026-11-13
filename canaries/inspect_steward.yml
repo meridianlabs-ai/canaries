@@ -11,16 +11,15 @@ cadence: nightly
 python: "3.12"
 timeout-minutes: 30
 # The shared install action does the install (see README.md, "install-with"):
-# an editable install of the dev extra, with inspect_harbor main in the same
-# resolution in place of the git source that UV_NO_SOURCES drops. --no-config
-# also drops steward's override-dependencies (openai, for litellm's old
-# openai<3 cap); litellm lifted that cap in 1.108.0, and it isn't in this
-# resolution.
+# an editable install of the dev extra. --no-config (from project-uv-settings:
+# ignore) drops the repo's per-package cooldowns, and --exclude-newer false
+# (from versions: unlocked) clears the cooldown. --no-config also drops
+# steward's override-dependencies (openai, for litellm's old openai<3 cap);
+# litellm lifted that cap in 1.108.0, and it isn't in this resolution.
 install-with:
   versions: unlocked
   project-uv-settings: ignore
   extras: dev
-  also-install-unlocked: git+https://github.com/meridianlabs-ai/inspect_harbor.git@main
 test: |
   # Every check runs; the step fails if any did.
   status=0

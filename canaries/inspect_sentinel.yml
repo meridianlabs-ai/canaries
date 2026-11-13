@@ -1,6 +1,6 @@
-# inspect_sentinel against inspect_ai and inspect_scout main and the newest
-# releases of everything else, on the newest Python in its CI, as one canary so
-# a break alerts once: tests, pyright, and the LiteLLM guardrail at each LiteLLM
+# inspect_sentinel against the newest releases of everything, inspect_ai and
+# inspect_scout included, on the newest Python in its CI, as one canary so a
+# break alerts once: tests, pyright, and the LiteLLM guardrail at each LiteLLM
 # version sentinel's CI supports plus the newest LiteLLM release.
 name: inspect_sentinel
 repo: meridianlabs-ai/inspect_sentinel
@@ -9,17 +9,13 @@ cadence: nightly
 python: "3.14"
 timeout-minutes: 60
 # The shared install action does the install (see README.md, "install-with"):
-# an editable install of the dev extra, with inspect_ai and inspect_scout main
-# in the same resolution, so scout's inspect-ai requirement resolves to the git
-# inspect_ai. The workflow step sets UV_NO_SOURCES, so uv ignores scout's git
-# source for inspect-ai, which would conflict with the git URL here.
+# an editable install of the dev extra. --no-config (from project-uv-settings:
+# ignore) drops the repo's per-package cooldowns, and --exclude-newer false
+# (from versions: unlocked) clears the cooldown.
 install-with:
   versions: unlocked
   project-uv-settings: ignore
   extras: dev
-  also-install-unlocked: |
-    git+https://github.com/UKGovernmentBEIS/inspect_ai.git@main
-    git+https://github.com/meridianlabs-ai/inspect_scout.git@main
 test: |
   # Every check runs; the step fails if any did.
   status=0
