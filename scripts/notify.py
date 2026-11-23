@@ -99,8 +99,9 @@ JOB_NAME = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)(?: \(([A-Za-z0-9][A-Za-z0-9
 # The state lines this script writes and its next run reads. Runs before the
 # table also wrote a repeat count and a ts after the hash; they are ignored.
 RECORD = re.compile(r"canary-notify: ([A-Za-z0-9][A-Za-z0-9._-]*) (red|green) (-|[0-9a-f]{64})(?: \d+ (?:-|\d+\.\d+))?")
-# The table's ts and its text line. Canary names hold only [A-Za-z0-9._-].
-TABLE = re.compile(r"canary-table: (\d+\.\d+) (Canaries: [A-Za-z0-9 ,.:_-]*)")
+# The table's ts and its text line, whose changes are kept when a later run
+# edits it. Canary names hold only [A-Za-z0-9._-].
+TABLE = re.compile(r"canary-table: (\d+\.\d+) Canaries: \d+ red, \d+ green\.([A-Za-z0-9 ,.:_-]*)")
 
 
 # --- state ------------------------------------------------------------------
@@ -371,9 +372,10 @@ def table_line(ts, text):
 
 
 def table_record(log):
-    """(ts, text line) from the last `canary-table:` line of a notify job's
-    log, or None."""
-    found = [match.groups() for match in (TABLE.fullmatch(clean(line)) for line in log.splitlines()) if match]
+    """(ts, changes) from the last `canary-table:` line of a notify job's log,
+    or None. changes is the text line after its counts, "" for none. The
+    line is read whole: with many changes it is longer than LINE_CHARS."""
+    found = [match.groups() for match in (TABLE.fullmatch(clean(line, limit=None)) for line in log.splitlines()) if match]
     return found[-1] if found else None
 
 
@@ -796,7 +798,7 @@ def main():
         return record
 
     def latest_table():
-        """(ts, text line) of the table the newest earlier run's notify job
+        """(ts, changes) of the table the newest earlier run's notify job
         posted or edited, or None if it can't be read."""
         try:
             jobs = next(iter(github.history(run)), [])
@@ -809,7 +811,7 @@ def main():
             print("::warning::no table in the last run's notify log")
         return table
 
-    cells, turned_red, changed, recovered, now_parts = {}, [], [], [], {}
+    cells, turned_red, changed, recovered, now_parts, state_lines = {}, [], [], [], {}, []
     for name, parts in by_canary(jobs).items():
         now = canary_state(parts)
         if now is None:
@@ -834,7 +836,7 @@ def main():
                 recovered.append(name)
             else:
                 print(f"{name}: still green")
-            print(record_line(Record(name, "green", "-")))
+            state_lines.append(record_line(Record(name, "green", "-")))
             continue
 
         digest = set_hash(failure_set(parts, read_log))
@@ -848,7 +850,7 @@ def main():
             else:
                 print(f"{name}: still red, failures changed")
                 changed.append(name)
-        print(record_line(Record(name, "red", digest)))
+        state_lines.append(record_line(Record(name, "red", digest)))
 
     # Canaries that didn't run this time show their last result.
     for name in [] if repost else sorted(set(canary_names()) - set(cells)):
@@ -865,22 +867,25 @@ def main():
         print("No canary has a result; nothing to post.")
         return
     text = summary_text(table, turned_red, changed, recovered)
-    if not (turned_red or changed or recovered or repost or env.get("SCHEDULE") == NIGHTLY):
-        if not slack.threads:
-            print("No change, and the webhook can't edit the table; nothing to post.")
-            return
-        if latest := latest_table():
-            ts, text = latest
-            print(f"No change; editing the table at {ts}, keeping its text line.")
-            slack.update(ts, text, table_blocks(text, table))
-            print(table_line(ts, text))
-            return
-    ts = slack.post(text, table_blocks(text, table), webhook_text=plain_table(text, table))
-    print(f"Posted the table: {text}")
-    if not ts:
-        return
-    print(table_line(ts, text))
-    for name in sorted(turned_red + changed):
+    ts = None
+    if turned_red or changed or recovered or repost or env.get("SCHEDULE") == NIGHTLY:
+        ts = slack.post(text, table_blocks(text, table), webhook_text=plain_table(text, table))
+        print(f"Posted the table: {text}")
+    elif not slack.threads:
+        print("No change, and the webhook can't edit the table; nothing to post.")
+    elif latest := latest_table():
+        ts, changes = latest
+        text = summary_text(table) + changes
+        print(f"No change; editing the table at {ts}: this run's counts, its changes kept.")
+        slack.update(ts, text, table_blocks(text, table))
+    else:
+        print("No change, and no table to edit; nothing to post.")
+    if ts:
+        print(table_line(ts, text))
+    # The state for the next run, written only once the table is out (a
+    # failed post raises), so the changes of a lost table show again next run.
+    print("\n".join(state_lines))
+    for name in sorted(turned_red + changed) if ts else []:
         reply(name, now_parts[name], "turned red" if name in turned_red else "failures changed", ts)
 
 

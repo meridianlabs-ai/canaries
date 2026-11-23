@@ -675,7 +675,8 @@ class FailureSet(unittest.TestCase):
                 line("00:01", "canary-table: 3.5"),  # no text line
             ]
         )
-        self.assertEqual(notify.table_record(log), ("1700000000.5", text))
+        self.assertEqual(notify.table_record(log), ("1700000000.5", " Turned red: inspect_ai."))
+        self.assertEqual(notify.table_record(line("00:00", "canary-table: 1.5 Canaries: 0 red, 3 green.")), ("1.5", ""))
         self.assertIsNone(notify.table_record(line("00:00", "canary-notify: a green -")))
 
 
@@ -763,8 +764,10 @@ class Main(unittest.TestCase):
         fake.raise_on = raise_on
         out = io.StringIO()
         with mock.patch.dict(os.environ, {**ENV, **env}, clear=True), mock.patch.object(notify, "request", fake), mock.patch.object(notify.time, "sleep"), contextlib.redirect_stdout(out):
-            notify.main()
-        self.output = out.getvalue()
+            try:
+                notify.main()
+            finally:
+                self.output = out.getvalue()
         return fake.posts
 
     def records(self):
@@ -806,7 +809,7 @@ class Main(unittest.TestCase):
         self.assertEqual(self.records()["other"], notify.Record("other", "red", notify.set_hash({("", notify.NO_TEST_IDS)})))
         self.assertEqual(notify.table_record(self.output)[0], "1.0")
 
-    def quiet_runs(self, logs, table="canary-table: 1700000000.5 Canaries: 1 red, 2 green. Turned red: a."):
+    def quiet_runs(self, logs, table="canary-table: 1700000000.5 Canaries: 2 red, 1 green. Turned red: a, c."):
         """a stays red with the same failures, b stays green, c didn't run this time."""
         return {
             100: [job("a", "failure", id=1, run_id=100), job("b", "success", id=2, run_id=100), job("c", "cancelled", id=3, run_id=100)],
@@ -821,9 +824,9 @@ class Main(unittest.TestCase):
         url, body = posts[0]
         self.assertEqual(url, "https://slack.com/api/chat.update")
         self.assertEqual(body["ts"], "1700000000.5")
-        # The edit keeps the table's text line, change line included; only the cells change.
-        self.assertEqual(body["text"], "Canaries: 1 red, 2 green. Turned red: a.")
-        self.assertEqual(body["blocks"][0]["text"]["text"], "Canaries: 1 red, 2 green. Turned red: a.")
+        # The edit has this run's counts and keeps the table's changes.
+        self.assertEqual(body["text"], "Canaries: 1 red, 2 green. Turned red: a, c.")
+        self.assertEqual(body["blocks"][0]["text"]["text"], "Canaries: 1 red, 2 green. Turned red: a, c.")
         # c didn't run, so its cell links its last run.
         self.assertEqual(
             table_rows(body["blocks"])[0],
@@ -832,15 +835,61 @@ class Main(unittest.TestCase):
         self.assertEqual(self.records()["a"], notify.Record("a", "red", notify.set_hash({("", notify.NO_TEST_IDS)})))
         self.assertEqual(self.records()["b"], notify.Record("b", "green", "-"))
         self.assertNotIn("c", self.records())
-        self.assertEqual(notify.table_record(self.output), ("1700000000.5", "Canaries: 1 red, 2 green. Turned red: a."))  # the next run edits it too
+        self.assertIn("canary-table: 1700000000.5 Canaries: 1 red, 2 green. Turned red: a, c.", self.output)  # the next run edits it too
 
-    def test_no_change_without_a_readable_table_posts_a_new_one(self):
+    def test_no_change_without_a_readable_table_posts_nothing(self):
+        """As on the webhook path, a table goes out only on a change or the
+        nightly run. So a bot post that fell back to the webhook, and left no
+        table to edit, is not followed by a table on every run."""
         logs = {}
-        posts = self.run_main(self.quiet_runs(logs, table=""), self.BOT, logs)
-        self.assertEqual([url for url, _ in posts], ["https://slack.com/api/chat.postMessage"])
-        self.assertEqual(posts[0][1]["text"], "Canaries: 1 red, 1 green.")
+        posts = self.run_main(self.quiet_runs(logs, table=""), {**self.BOT, **self.WEBHOOK}, logs)
+        self.assertEqual(posts, [])
         self.assertIn("::warning::no table in the last run's notify log", self.output)
-        self.assertEqual(notify.table_record(self.output)[0], "1.0")
+        self.assertIsNone(notify.table_record(self.output))
+        self.assertEqual(self.records()["a"].state, "red")  # the state still goes to the next run
+
+    def test_a_change_line_longer_than_a_log_line_is_read_back(self):
+        """All 15 canaries change in one run: 10 turn red, 5 have changed
+        failures. The text line is longer than LINE_CHARS, and the next quiet
+        run still edits that table."""
+        names = sorted(name.removesuffix(".yml") for name in os.listdir(notify.CANARIES) if name.endswith(".yml"))
+        self.assertEqual(len(names), 15)
+        self.names = names
+        new, changed = names[:10], names[10:]
+        logs = {}
+        runs = {
+            100: [job(name, "failure", id=i, run_id=100) for i, name in enumerate(names)],
+            99: [job(name, "success" if name in new else "failure", id=100 + i, run_id=99) for i, name in enumerate(names)]
+            + [notified(99, "\n".join(red_record(name, ("", "old")) for name in changed), logs, 200)],
+        }
+        posts = self.run_main(runs, self.BOT, logs)
+        text = f"Canaries: 15 red, 0 green. Turned red: {', '.join(new)}. Failures changed: {', '.join(changed)}."
+        self.assertEqual(texts(posts)[0], text)
+        # The fake Slack's ts is short; a real one makes the line longer than LINE_CHARS.
+        log = self.output.replace("canary-table: 1.0 ", "canary-table: 1763876000.123456 ")
+        self.assertGreater(len(notify.table_line("1763876000.123456", text)), notify.LINE_CHARS)
+        self.assertEqual(notify.table_record(log), ("1763876000.123456", text.removeprefix("Canaries: 15 red, 0 green.")))
+        # The next run, with no change, edits that table and keeps its changes.
+        logs = {}
+        runs = {
+            100: [job(name, "failure", id=i, run_id=100) for i, name in enumerate(names)],
+            99: [job(name, "failure", id=100 + i, run_id=99) for i, name in enumerate(names)] + [notified(99, log, logs, 200)],
+        }
+        posts = self.run_main(runs, self.BOT, logs)
+        self.assertEqual([(url, body["ts"], body["text"]) for url, body in posts], [("https://slack.com/api/chat.update", "1763876000.123456", text)])
+
+    def test_a_failed_post_leaves_the_changes_to_the_next_run(self):
+        """The table post fails: no state is written, so the next run reports
+        the canary again and posts its reply."""
+        runs = {100: [job("a", "failure", id=1, run_id=100)], 99: [job("a", "success", id=2, run_id=99)]}
+        with self.assertRaises(notify.urllib.error.URLError):
+            self.run_main(runs, self.BOT, raise_on="chat.postMessage")
+        self.assertEqual(self.records(), {})
+        self.assertIsNone(notify.table_record(self.output))
+        runs = {100: [job("a", "failure", id=3, run_id=100)], 99: [job("a", "failure", id=1, run_id=99), job("notify", "failure", id=4, run_id=99)]}
+        posts = self.run_main(runs, self.BOT, {1: "", 4: self.output})
+        self.assertEqual(texts(posts)[0], "Canaries: 1 red, 0 green. Failures changed: a.")
+        self.assertTrue(texts(posts)[1].startswith("Canary `a` failures changed."))
 
     def test_the_nightly_run_always_posts_a_new_table(self):
         logs = {}
