@@ -22,7 +22,13 @@ Because GitHub keeps caches, secrets and permissions separate per repository, a 
 
 Tests that need secrets or API keys skip themselves here. Those run separately, against each project's lockfile.
 
-A red canary means something upstream changed, not that our code did. Each run logs the exact commit tested and the versions it installed.
+A red canary usually means that something upstream changed, not that our code did. Each run logs the exact commit tested and the versions it installed. The break is one of three kinds:
+
+1. **A fresh install breaks.** `pip install <package>` fails, or the package fails at runtime. This is the worst case, because real users hit it.
+2. **Tests break.** A test fails because of a new dependency version, a flaky test or a rate limit. Sometimes the failure is an early sign of a real bug, and sometimes it is only noise from the test.
+3. **Only static checks break.** pyright, mypy or a similar checker fails on the new dependency versions. The product installs and runs correctly.
+
+We never leave a canary red. A red canary means that someone must act. When the fix is upstream and released soon, we make the canary green with a temporary change in this repository, not with workarounds in each product repository. Each temporary change says why it is there, links the upstream fix, and says when to remove it. [Hold back a dependency temporarily](#hold-back-a-dependency-temporarily) shows how.
 
 ## Alerts
 
@@ -87,3 +93,20 @@ variants:
 ```
 
 A pull request runs only the canaries it changes, so a new entry shows its first result on the PR. A change to the workflow or the planner runs every canary; notifier changes run its unit tests instead. To run one canary by hand (all its parts): **Actions → canary → Run workflow**, with `only` set to its name.
+
+## Hold back a dependency temporarily
+
+To hold back a dependency, add a requirement with an upper bound to `also-install-unlocked` in the part's `install-with`. The shared action installs these lines in the same unlocked resolution as the project, so the bound applies to the whole install. Put the comment above the key: a `#` line inside a `|` block goes to uv as a requirement.
+
+```yaml
+install-with:
+  versions: unlocked
+  project-uv-settings: ignore
+  extras: dev
+  # Temporary hold. <Why the newest release breaks the canary.>
+  # <Link to the upstream fix.>
+  # Remove when <the fix is released>.
+  also-install-unlocked: example-package<2.0
+```
+
+Hold back only a package that the canary already installs. A line in `also-install-unlocked` is a requirement, not only a bound: for a package that the canary does not install, the line adds it to the install. Hold back the package only in the canaries that are red. While the hold is in place, the canary does not test newer releases of that package, so remove it as soon as the upstream fix is released.
