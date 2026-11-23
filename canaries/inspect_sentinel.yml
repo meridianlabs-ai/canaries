@@ -17,9 +17,15 @@ install-with:
   versions: unlocked
   project-uv-settings: ignore
   extras: dev
+  # Temporary hold. The types-grpcio stubs from Nov-22 on use
+  # _typeshed.FloatInt, which pyright 1.1.414 does not have, so pyright fails.
+  # Pyright 1.1.415 has it:
+  # https://github.com/microsoft/pyright/releases/tag/1.1.415
+  # Remove when pyright 1.1.415 is on PyPI.
   also-install-unlocked: |
     git+https://github.com/UKGovernmentBEIS/inspect_ai.git@main
     git+https://github.com/meridianlabs-ai/inspect_scout.git@main
+    types-grpcio<1.85.0.20261122
 test: |
   # Every check runs; the step fails if any did.
   status=0
