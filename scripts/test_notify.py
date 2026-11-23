@@ -878,18 +878,30 @@ class Main(unittest.TestCase):
         posts = self.run_main(runs, self.BOT, logs)
         self.assertEqual([(url, body["ts"], body["text"]) for url, body in posts], [("https://slack.com/api/chat.update", "1763876000.123456", text)])
 
-    def test_a_failed_post_leaves_the_changes_to_the_next_run(self):
-        """The table post fails: no state is written, so the next run reports
-        the canary again and posts its reply."""
-        runs = {100: [job("a", "failure", id=1, run_id=100)], 99: [job("a", "success", id=2, run_id=99)]}
+    def test_a_failed_post_leaves_only_its_changes_to_the_next_run(self):
+        """The nightly post fails with a..e steadily red and f turned red. Only
+        f's state is withheld, so the next run reports f again (as changed
+        failures: the job results already show it red) and not a..e."""
+        steady, names = list("abcde"), list("abcdef")
+        logs = {}
+        runs = {
+            100: [job(name, "failure", id=i, run_id=100) for i, name in enumerate(names)],
+            99: [job(name, "failure" if name in steady else "success", id=10 + i, run_id=99) for i, name in enumerate(names)]
+            + [notified(99, "\n".join(red_record(name) for name in steady), logs, 90)],
+        }
         with self.assertRaises(notify.urllib.error.URLError):
-            self.run_main(runs, self.BOT, raise_on="chat.postMessage")
-        self.assertEqual(self.records(), {})
+            self.run_main(runs, {**self.BOT, **self.NIGHTLY}, logs, raise_on="chat.postMessage")
+        self.assertEqual(sorted(self.records()), steady)
         self.assertIsNone(notify.table_record(self.output))
-        runs = {100: [job("a", "failure", id=3, run_id=100)], 99: [job("a", "failure", id=1, run_id=99), job("notify", "failure", id=4, run_id=99)]}
-        posts = self.run_main(runs, self.BOT, {1: "", 4: self.output})
-        self.assertEqual(texts(posts)[0], "Canaries: 1 red, 0 green. Failures changed: a.")
-        self.assertTrue(texts(posts)[1].startswith("Canary `a` failures changed."))
+        logs = {}
+        runs = {
+            100: [job(name, "failure", id=20 + i, run_id=100) for i, name in enumerate(names)],
+            99: [job(name, "failure", id=i, run_id=99) for i, name in enumerate(names)] + [notified(99, self.output, logs, 90)],
+        }
+        posts = self.run_main(runs, self.BOT, logs)
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(texts(posts)[0], "Canaries: 6 red, 0 green. Failures changed: f.")
+        self.assertTrue(texts(posts)[1].startswith("Canary `f` failures changed."))
 
     def test_the_nightly_run_always_posts_a_new_table(self):
         logs = {}

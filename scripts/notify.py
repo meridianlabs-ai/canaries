@@ -811,7 +811,7 @@ def main():
             print("::warning::no table in the last run's notify log")
         return table
 
-    cells, turned_red, changed, recovered, now_parts, state_lines = {}, [], [], [], {}, []
+    cells, turned_red, changed, recovered, now_parts, state_lines = {}, [], [], [], {}, {}
     for name, parts in by_canary(jobs).items():
         now = canary_state(parts)
         if now is None:
@@ -836,7 +836,7 @@ def main():
                 recovered.append(name)
             else:
                 print(f"{name}: still green")
-            state_lines.append(record_line(Record(name, "green", "-")))
+            state_lines[name] = record_line(Record(name, "green", "-"))
             continue
 
         digest = set_hash(failure_set(parts, read_log))
@@ -850,7 +850,7 @@ def main():
             else:
                 print(f"{name}: still red, failures changed")
                 changed.append(name)
-        state_lines.append(record_line(Record(name, "red", digest)))
+        state_lines[name] = record_line(Record(name, "red", digest))
 
     # Canaries that didn't run this time show their last result.
     for name in [] if repost else sorted(set(canary_names()) - set(cells)):
@@ -867,6 +867,11 @@ def main():
         print("No canary has a result; nothing to post.")
         return
     text = summary_text(table, turned_red, changed, recovered)
+    # The state for the next run. The canaries this table reports as turned
+    # red or changed get theirs only once it is out (a failed post raises),
+    # so their change shows again next run.
+    reported = sorted(turned_red + changed)
+    print("\n".join(line for name, line in state_lines.items() if name not in reported))
     ts = None
     if turned_red or changed or recovered or repost or env.get("SCHEDULE") == NIGHTLY:
         ts = slack.post(text, table_blocks(text, table), webhook_text=plain_table(text, table))
@@ -882,10 +887,8 @@ def main():
         print("No change, and no table to edit; nothing to post.")
     if ts:
         print(table_line(ts, text))
-    # The state for the next run, written only once the table is out (a
-    # failed post raises), so the changes of a lost table show again next run.
-    print("\n".join(state_lines))
-    for name in sorted(turned_red + changed) if ts else []:
+    print("\n".join(state_lines[name] for name in reported if name in state_lines))
+    for name in reported if ts else []:
         reply(name, now_parts[name], "turned red" if name in turned_red else "failures changed", ts)
 
 
