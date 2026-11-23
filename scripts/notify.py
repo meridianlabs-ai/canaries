@@ -20,8 +20,8 @@ no test ids" item. notify keeps its state in its own job log: one
 `canary-notify: <canary> <state> <hash>` line per canary that ran, which the
 next run reads to compare failure sets, and one `canary-table: <ts> <text>`
 line for the table it posted or edited, which the next run edits. An edit
-keeps the table's text line, changes included, so that a reader of the
-channel never misses them; only the cells and their links change.
+updates the counts in the text line and keeps its changes, so that a reader
+of the channel never misses them; the cells and their links update too.
 
 A canary's previous state, red or green, comes from the earlier runs' job
 results. The `canary-notify:` record only compares a red canary's failed
@@ -669,8 +669,9 @@ class Slack:
         """Edit the message at `ts` (chat.update); a no-op on the webhook path.
 
         On a failed edit it warns and returns: the table is already posted, so
-        the edit only updates its links, which the next run tries again. A
-        failed edit is a not-ok reply or a transport error from request().
+        the edit only refreshes its counts and links, which the next run tries
+        again. A failed edit is a not-ok reply or a transport error from
+        request().
         """
         if not self.threads:
             return
