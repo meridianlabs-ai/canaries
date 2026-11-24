@@ -126,6 +126,23 @@ jobs:
         run: |
           echo "canary-tested: ${{ matrix.repo }}@$(git rev-parse HEAD)"
 
+      # This repository, for scripts/check_git_sources.py below. No credentials.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: .canaries
+          persist-credentials: false
+
+      # Canaries test PyPI releases, and uv applies the tested repo's
+      # [tool.uv.sources], so a git source would install a git branch in place
+      # of the newest release. Fail on one before anything is installed.
+      # Standard library only, isolated (-I).
+      - name: No git sources
+        if: ${{ matrix.install-with.versions }}
+        working-directory: ${{ github.workspace }}
+        env:
+          PROJECT_DIR: ${{ matrix.install-with.project-dir }}
+        run: python3 -I .canaries/scripts/check_git_sources.py "$PROJECT_DIR"
+
       # The shared action installs the part's Python packages from its
       # install-with (the planner fills every input, so none arrives empty); its
       # setup-uv call reuses the one above. Then the part's own install lines,
