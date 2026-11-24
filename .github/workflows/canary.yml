@@ -14,7 +14,7 @@ on:
         type: boolean
         default: false
       repost_run:
-        description: Only re-post the alerts (with details) for the red canaries of this earlier run ID
+        description: Only re-post the table of this earlier run ID, with details for its red canaries
         required: false
   pull_request:
     paths:
@@ -210,8 +210,9 @@ jobs:
   # credentials persisted) to run scripts/notify.py, which uses only the
   # Python standard library. It reads job results and logs through the API
   # and treats log text as untrusted: escaped, truncated and posted only in
-  # code blocks under a label. Alerts when a canary turns red, when its failed
-  # tests change, and when it recovers.
+  # code blocks under a label. Posts a table of the canaries when one turns red,
+  # when a red one's failed tests change, when one recovers, and after the
+  # nightly run; otherwise it edits the latest table.
   notify:
     needs: [plan, canary]
     if: ${{ always() && (inputs.test_slack || inputs.repost_run || github.event_name == 'schedule') }}
@@ -225,8 +226,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Post red results and recoveries to Slack
+      - name: Post the canary table to Slack
         env:
+          SCHEDULE: ${{ github.event.schedule }}
           SLACK_BOT_TOKEN: ${{ secrets.CANARY_SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ vars.CANARY_SLACK_CHANNEL_ID }}
           SLACK_WEBHOOK_URL: ${{ secrets.CANARY_SLACK_WEBHOOK_URL }}
