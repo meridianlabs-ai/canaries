@@ -133,11 +133,9 @@ jobs:
       - name: Install the newest releases
         if: ${{ matrix.install-with.versions }}
         uses: meridianlabs-ai/actions/install-python-dependencies@2e29d39eac45f500a64f443ec31aa6fb874f9ddc # main, 2026-11-02
-        # A canary tests the newest releases. uv applies [tool.uv.sources] also
-        # with --no-config (inspect_scout points inspect-ai at inspect_ai main),
-        # so this turns sources off.
-        env:
-          UV_NO_SOURCES: "1"
+        # uv applies the repo's [tool.uv.sources] also with --no-config, so a
+        # path or workspace source the install requests is used as in the repo's
+        # own CI. Do not set UV_NO_SOURCES.
         with:
           versions: ${{ matrix.install-with.versions }}
           python-version: ${{ matrix.install-with.python-version }}
@@ -159,6 +157,29 @@ jobs:
       - name: Install the newest releases (own lines)
         if: ${{ matrix.install }}
         run: ${{ matrix.install }}
+
+      # Canaries test PyPI releases, but uv applies the tested repo's
+      # [tool.uv.sources] (also those of its local path packages), and an
+      # install line could install from git. Fail if anything in the environment
+      # the shared action installed into came from git. uv pip freeze shows such a
+      # package as `name @ git+...`. That environment is the action's
+      # environment-dir, else .venv; a relative one is relative to project-dir
+      # (this directory).
+      - name: No git installs
+        if: ${{ matrix.install-with.versions }}
+        env:
+          ENVIRONMENT_DIR: ${{ matrix.install-with.environment-dir }}
+        run: |
+          set -o pipefail
+          # An absolute path, as the action makes it, so uv never reads a
+          # relative one as a Python name.
+          env_dir=${ENVIRONMENT_DIR:-.venv}
+          [[ $env_dir == /* ]] || env_dir=$PWD/$env_dir
+          from_git=$(uv pip freeze --python "$env_dir" | sed -n 's/ @ git+.*//p')
+          for pkg in $from_git; do
+            echo "::error::$pkg was installed from git; canaries test PyPI releases. Remove the git source or git URL."
+          done
+          test -z "$from_git"
 
       # One `canary-installed: <name> <version>` line per package, which
       # scripts/notify.py compares with the canary's last passing run.

@@ -8,8 +8,11 @@ cadence: 2h
 python: "3.14"
 timeout-minutes: 45
 # The shared install action does the install (see README.md, "install-with"):
-# an editable install of the dev extra, plus the tests' local_eval package,
-# which flow's dev group gets from a path source that UV_NO_SOURCES drops.
+# an editable install of the dev extra, plus ./tests/local_eval. Flow's default
+# dev group is what names local-eval (from a path source), and the unlocked
+# action path installs the extra, not that group. --no-config (from
+# project-uv-settings: ignore) drops the repo's per-package cooldowns, and
+# --exclude-newer false (from versions: unlocked) clears the cooldown.
 install-with:
   versions: unlocked
   project-uv-settings: ignore
