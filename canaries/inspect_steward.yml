@@ -20,6 +20,14 @@ install-with:
   versions: unlocked
   project-uv-settings: ignore
   extras: dev
+  # Temporary hold. The types-PyYAML and types-psutil stubs from Nov-22 on use
+  # _typeshed.FloatInt, which pyright 1.1.414 does not have, so pyright fails.
+  # Pyright 1.1.415 has it:
+  # https://github.com/microsoft/pyright/releases/tag/1.1.415
+  # Remove when pyright 1.1.415 is on PyPI.
+  also-install-unlocked: |
+    types-PyYAML<6.0.12.20261122
+    types-psutil<7.2.2.20261122
 test: |
   # Every check runs; the step fails if any did.
   status=0
