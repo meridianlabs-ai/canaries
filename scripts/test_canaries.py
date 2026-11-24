@@ -211,54 +211,39 @@ class TargetRef(unittest.TestCase):
 
 
 class InstallGitUrls(unittest.TestCase):
-    # Every git+ URL in an install script must pin @main, so a canary can't drift
-    # onto a dependency's default branch.
-    BASE = {"name": "x", "repo": "o/r", "ref": "main"}
+    # Canaries test PyPI releases, so the planner rejects any git+ URL, pinned or
+    # not, in an install script or an install-with package input.
+    BASE = {"name": "x", "repo": "o/r", "ref": "main", "python": "3.11"}
+    URLS = (
+        "git+https://github.com/o/r.git",
+        "git+https://github.com/o/r.git@main",
+        "git+https://github.com/o/r.git@v1.0",
+        '"git+https://github.com/o/r.git@main"',
+        "git+ssh://git@github.com/o/r.git@main#subdirectory=pkg",
+        "pkg @ git+https://github.com/o/r.git",
+    )
+    PLACES = {
+        "install": lambda text: {"install": f"pip install {text}"},
+        "variant install": lambda text: {"variants": [{"label": "a", "install": f"pip install {text}"}]},
+        "also-install-unlocked": lambda text: {"install-with": {"versions": "unlocked", "also-install-unlocked": text}},
+        "also-install-without-deps": lambda text: {"install-with": {"versions": "unlocked", "also-install-without-deps": text}},
+    }
 
-    def test_unpinned_git_url_fails(self):
-        result = plan([{**self.BASE, "install": "uv pip install git+https://github.com/o/r.git"}])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("@main", result.stderr)
+    def test_a_git_url_fails(self):
+        for place, field in self.PLACES.items():
+            for url in self.URLS:
+                with self.subTest(place=place, url=url):
+                    result = plan([{**self.BASE, **field(url)}])
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("has git+ URL", result.stderr)
+                    self.assertIn("canaries test PyPI releases", result.stderr)
 
-    def test_git_url_pinned_to_another_ref_fails(self):
-        result = plan([{**self.BASE, "install": "uv pip install git+https://github.com/o/r.git@meridian"}])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("@main", result.stderr)
-
-    def test_git_url_pinned_to_main_passes(self):
-        result = plan([{**self.BASE, "install": "uv pip install git+https://github.com/o/r.git@main"}])
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_quoted_git_url_pinned_to_main_passes(self):
-        result = plan([{**self.BASE, "install": 'uv pip install "git+https://github.com/o/r.git@main"'}])
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_git_url_with_ref_before_fragment_fails(self):
-        result = plan([{**self.BASE, "install": "uv pip install git+https://github.com/o/r.git@dev#subdirectory=pkg@main"}])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("@main", result.stderr)
-
-    def test_install_without_a_git_url_passes(self):
-        result = plan([{**self.BASE, "install": "uv pip install -e .[dev]"}])
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_unpinned_git_url_in_a_variant_fails(self):
-        result = plan([{**self.BASE, "variants": [{"label": "a", "install": "pip install git+https://github.com/o/r.git"}]}])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("@main", result.stderr)
-
-    def test_git_url_followed_by_a_shell_separator_passes(self):
-        result = plan([{**self.BASE, "install": "pip install git+https://github.com/o/r.git@main; echo done"}])
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_git_url_followed_by_a_redirect_passes(self):
-        result = plan([{**self.BASE, "install": "pip install git+https://github.com/o/r.git@main>/dev/null"}])
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_git_url_pinned_to_a_main_prefixed_ref_fails(self):
-        result = plan([{**self.BASE, "install": "pip install git+https://github.com/o/r.git@main-old"}])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("@main", result.stderr)
+    def test_no_git_url_passes(self):
+        for place, field in self.PLACES.items():
+            for text in ("inspect-ai", "inspect-ai[dev]>=0.3", "./local/pkg"):
+                with self.subTest(place=place, text=text):
+                    result = plan([{**self.BASE, **field(text)}])
+                    self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class InstallWithValidation(unittest.TestCase):
@@ -331,17 +316,6 @@ class InstallWithValidation(unittest.TestCase):
         self.assertIn("install-with needs the part's python", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
-    def test_unpinned_git_url_in_a_package_input_fails(self):
-        for name in ("also-install-unlocked", "also-install-without-deps"):
-            with self.subTest(input=name):
-                result = plan([{**self.BASE, "install-with": {"versions": "unlocked", name: "git+https://github.com/o/r.git"}}])
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("@main", result.stderr)
-
-    def test_git_url_pinned_to_main_in_a_package_input_passes(self):
-        result = plan([{**self.BASE, "install-with": {"versions": "unlocked", "also-install-unlocked": "git+https://github.com/o/r.git@main"}}])
-        self.assertEqual(result.returncode, 0, result.stderr)
-
 
 class RealCanaries(unittest.TestCase):
     def test_every_canary_runs_static_analysis(self):
@@ -356,8 +330,8 @@ class RealCanaries(unittest.TestCase):
                 )
 
     def test_every_canary_passes_the_planner(self):
-        # Runs plan.py over the real files, so a wrong ref (or an unpinned git+
-        # install URL) in any canary fails CI.
+        # Runs plan.py over the real files, so a wrong ref (or a git+ install
+        # URL) in any canary fails CI.
         paths = sorted(glob.glob(os.path.join(CANARIES, "*.yml")))
         self.assertTrue(paths, "no canaries found")
         result = plan([load(path) for path in paths])

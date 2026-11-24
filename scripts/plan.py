@@ -64,8 +64,8 @@ DERIVED_INSTALL_INPUTS = {"python-version": "python", "project-dir": "checkout d
 # A canary never caches, so the install step hardcodes actions-cache none (like
 # the setup-uv step). The file can't set it, so the planner never fills it.
 STEP_SET_INSTALL_INPUTS = {"actions-cache"}
-# The install inputs that name packages to install, so each git+ URL in them is
-# held to the same @main pin as a plain `install` script.
+# The install inputs that name packages to install, so the planner rejects a
+# git+ URL in them, as in a plain `install` script.
 INSTALL_WITH_PACKAGE_INPUTS = ("also-install-unlocked", "also-install-without-deps")
 
 
@@ -73,25 +73,16 @@ def valid(value):
     return isinstance(value, str) and NAME.fullmatch(value)
 
 
-def pinned_to_main(url):
-    """True if a pip `git+` URL checks out main: after the `#...` fragment is
-    removed, its ref -- the part after the last '@' -- is `main` not followed by
-    a letter, digit, '_', '.', '/' or '-' (so trailing shell like `>/dev/null`
-    is ignored, but `main-old` is not main). An unpinned URL (no
-    '@ref') keeps the default branch, so it fails."""
-    ref = url.split("#")[0].split("@")[-1]
-    return bool(re.match(r"main(?![\w./-])", ref))
-
-
-def unpinned_git_url(script):
-    """The first `git+` URL in `script` not pinned to `@main`, or None."""
-    return next((url for url in GIT_URL.findall(script or "") if not pinned_to_main(url)), None)
+def no_git_url(where, field, script):
+    """Stop if `script` has a pip `git+` URL: canaries test PyPI releases."""
+    url = GIT_URL.search(script or "")
+    if url:
+        sys.exit(f"{where}: {field} has git+ URL {url.group()!r}; canaries test PyPI releases, so nothing installs from git")
 
 
 def check_install_with(where, part):
     """Stop if a part's install-with is not a mapping of known action inputs with
-    string values and a versions, or carries a git+ URL not pinned to @main in a
-    package input."""
+    string values and a versions, or carries a git+ URL in a package input."""
     iw = part.get("install-with")
     if iw is None:
         return
@@ -109,9 +100,7 @@ def check_install_with(where, part):
     if not iw.get("versions"):
         sys.exit(f"{where}: install-with needs versions (locked, hashed-requirements or unlocked)")
     for name in INSTALL_WITH_PACKAGE_INPUTS:
-        bad = unpinned_git_url(iw.get(name))
-        if bad:
-            sys.exit(f"{where}: install-with {name} git+ URL {bad!r} must pin @main")
+        no_git_url(where, f"install-with {name}", iw.get(name))
 
 
 def full_install_with(job):
@@ -147,9 +136,7 @@ for e in entries:
         sys.exit("plan and notify are the workflow's own job names; a canary can't use them")
     if e.get("ref") != "main":
         sys.exit(f"{e['name']}: ref must be 'main', not {e.get('ref')!r}")
-    bad = unpinned_git_url(e.get("install"))
-    if bad:
-        sys.exit(f"{e['name']}: install git+ URL {bad!r} must pin @main")
+    no_git_url(e["name"], "install", e.get("install"))
     check_install_with(e["name"], e)
     variants = e.get("variants")
     if variants is None:
@@ -162,9 +149,7 @@ for e in entries:
             sys.exit(f"{e['name']}: variant label {label!r} must be {RULE}")
         if v.keys() - VARIANT_FIELDS:
             sys.exit(f"{e['name']} ({v['label']}): a variant can only set {', '.join(sorted(VARIANT_FIELDS))}")
-        bad = unpinned_git_url(v.get("install"))
-        if bad:
-            sys.exit(f"{e['name']} ({v['label']}): install git+ URL {bad!r} must pin @main")
+        no_git_url(f"{e['name']} ({v['label']})", "install", v.get("install"))
         check_install_with(f"{e['name']} ({v['label']})", v)
 
 # Check each repository out under its own name, as its own CI does: some test

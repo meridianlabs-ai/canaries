@@ -126,23 +126,6 @@ jobs:
         run: |
           echo "canary-tested: ${{ matrix.repo }}@$(git rev-parse HEAD)"
 
-      # This repository, for scripts/check_git_sources.py below. No credentials.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: .canaries
-          persist-credentials: false
-
-      # Canaries test PyPI releases, and uv applies the tested repo's
-      # [tool.uv.sources], so a git source would install a git branch in place
-      # of the newest release. Fail on one before anything is installed.
-      # Standard library only, isolated (-I).
-      - name: No git sources
-        if: ${{ matrix.install-with.versions }}
-        working-directory: ${{ github.workspace }}
-        env:
-          PROJECT_DIR: ${{ matrix.install-with.project-dir }}
-        run: python3 -I .canaries/scripts/check_git_sources.py "$PROJECT_DIR"
-
       # The shared action installs the part's Python packages from its
       # install-with (the planner fills every input, so none arrives empty); its
       # setup-uv call reuses the one above. Then the part's own install lines,
@@ -174,6 +157,29 @@ jobs:
       - name: Install the newest releases (own lines)
         if: ${{ matrix.install }}
         run: ${{ matrix.install }}
+
+      # Canaries test PyPI releases, but uv applies the tested repo's
+      # [tool.uv.sources] (also those of its local path packages), and an
+      # install line could install from git. Fail if anything in the environment
+      # the shared action installed into came from git. uv pip freeze shows such a
+      # package as `name @ git+...`. That environment is the action's
+      # environment-dir, else .venv; a relative one is relative to project-dir
+      # (this directory).
+      - name: No git installs
+        if: ${{ matrix.install-with.versions }}
+        env:
+          ENVIRONMENT_DIR: ${{ matrix.install-with.environment-dir }}
+        run: |
+          set -o pipefail
+          # An absolute path, as the action makes it, so uv never reads a
+          # relative one as a Python name.
+          env_dir=${ENVIRONMENT_DIR:-.venv}
+          [[ $env_dir == /* ]] || env_dir=$PWD/$env_dir
+          from_git=$(uv pip freeze --python "$env_dir" | sed -n 's/ @ git+.*//p')
+          for pkg in $from_git; do
+            echo "::error::$pkg was installed from git; canaries test PyPI releases. Remove the git source or git URL."
+          done
+          test -z "$from_git"
 
       # One `canary-installed: <name> <version>` line per package, which
       # scripts/notify.py compares with the canary's last passing run.

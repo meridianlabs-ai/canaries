@@ -161,15 +161,20 @@ class CanaryWorkflow(unittest.TestCase):
         step = next(s for s in self.jobs["canary"]["steps"] if uses(s) == "meridianlabs-ai/actions/install-python-dependencies")
         self.assertNotIn("UV_NO_SOURCES", step.get("env") or {})
 
-    def test_the_git_source_check_runs_before_the_install(self):
-        # It reads the project the install step installs, before any install.
-        names = [s.get("name") for s in self.jobs["canary"]["steps"]]
-        self.assertLess(names.index("No git sources"), names.index("Install the newest releases"))
-        check = next(s for s in self.jobs["canary"]["steps"] if s.get("name") == "No git sources")
-        install = next(s for s in self.jobs["canary"]["steps"] if s.get("name") == "Install the newest releases")
-        self.assertEqual(check["if"], install["if"])
-        self.assertEqual(check["env"]["PROJECT_DIR"], install["with"]["project-dir"])
-        self.assertIn("python3 -I .canaries/scripts/check_git_sources.py", check["run"])
+    def test_the_git_install_check_runs_after_every_install(self):
+        # It lists what the install steps put in the shared action's environment,
+        # so it runs after both of them and before Test.
+        steps = self.jobs["canary"]["steps"]
+        names = [s.get("name") for s in steps]
+        check = names.index("No git installs")
+        self.assertGreater(check, names.index("Install the newest releases"))
+        self.assertGreater(check, names.index("Install the newest releases (own lines)"))
+        self.assertLess(check, names.index("Test"))
+        install = steps[names.index("Install the newest releases")]
+        self.assertEqual(steps[check]["if"], install["if"])
+        self.assertEqual(steps[check]["env"]["ENVIRONMENT_DIR"], install["with"]["environment-dir"])
+        self.assertIn("env_dir=${ENVIRONMENT_DIR:-.venv}", steps[check]["run"])
+        self.assertIn('uv pip freeze --python "$env_dir"', steps[check]["run"])
 
     def test_the_canary_job_carries_the_warning_comment(self):
         self.assertTrue(has_warning_comment(raw("canary.yml")))
